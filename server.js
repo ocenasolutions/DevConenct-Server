@@ -11,8 +11,8 @@ const app = express();
 
 // ✅ Allowed frontend origins
 const allowedOrigins = [
-  "https://melodic-sawine-ac9059.netlify.app", // your Netlify frontend
-  "http://localhost:3000" // optional: local dev
+  "https://melodic-sawine-ac9059.netlify.app", 
+  "http://localhost:3000" 
 ];
 
 // ✅ CORS middleware

@@ -661,71 +661,299 @@ const getAvailableSlotsForSlot = async (req, res) => {
     const { slotId } = req.params
     const { date } = req.query
 
+    console.log("=== AVAILABILITY CHECK START ===")
+    console.log("Slot ID:", slotId)
+    console.log("Requested Date:", date)
+    console.log("Request URL:", req.url)
+    console.log("Request method:", req.method)
+
     if (!date) {
+      console.log("❌ No date parameter provided")
       return res.status(400).json({
         success: false,
         message: "Date parameter is required",
       })
     }
 
+    // Find the slot
+    console.log("🔍 Searching for slot with ID:", slotId)
     const slot = await DeveloperSlot.findById(slotId)
-    if (!slot || !slot.isActive) {
+
+    if (!slot) {
+      console.log("❌ Slot not found in database")
       return res.status(404).json({
         success: false,
-        message: "Slot not found or inactive",
+        message: "Slot not found",
       })
     }
 
-    const requestedDate = new Date(date)
-    const dayOfWeek = requestedDate.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase()
+    if (!slot.isActive) {
+      console.log("❌ Slot found but not active")
+      return res.status(404).json({
+        success: false,
+        message: "Slot not active",
+      })
+    }
 
-    // Check if slot is available on this day
-    if (!slot.availableDays.includes(dayOfWeek)) {
+    console.log("✅ Found active slot:", {
+      id: slot._id,
+      title: slot.title,
+      duration: slot.duration,
+      advanceBookingDays: slot.advanceBookingDays,
+      availableDays: slot.availableDays,
+      availableTimes: slot.availableTimes,
+      isActive: slot.isActive,
+    })
+
+    // Parse the requested date
+    console.log("📅 Parsing requested date:", date)
+    const requestedDate = new Date(date)
+    const today = new Date()
+
+    console.log("📅 Raw dates:", {
+      requestedDateRaw: requestedDate.toString(),
+      todayRaw: today.toString(),
+    })
+
+    // Set both dates to start of day for accurate comparison
+    requestedDate.setHours(0, 0, 0, 0)
+    today.setHours(0, 0, 0, 0)
+
+    const daysDifference = Math.ceil((requestedDate - today) / (1000 * 60 * 60 * 24))
+
+    console.log("📅 Date validation:", {
+      requestedDate: requestedDate.toISOString(),
+      today: today.toISOString(),
+      daysDifference,
+      advanceBookingDays: slot.advanceBookingDays,
+    })
+
+    // Check if date is in the past
+    if (daysDifference < 0) {
+      console.log("❌ Date is in the past")
       return res.json({
         success: true,
         availableSlots: [],
-        message: "No availability on this day",
+        message: "Cannot book dates in the past",
       })
     }
 
-    // Get existing bookings for this date
+    // Check advance booking limit
+    if (daysDifference > slot.advanceBookingDays) {
+      console.log(`❌ Date too far in advance: ${daysDifference} > ${slot.advanceBookingDays}`)
+      return res.json({
+        success: true,
+        availableSlots: [],
+        message: `Cannot book more than ${slot.advanceBookingDays} days in advance`,
+      })
+    }
+
+    // Get day of week
+    const dayOfWeek = requestedDate.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase()
+
+    console.log("📅 Day validation:", {
+      dayOfWeek,
+      availableDays: slot.availableDays,
+      isAvailable: slot.availableDays.includes(dayOfWeek),
+    })
+
+    // Check if slot is available on this day
+    if (!slot.availableDays.includes(dayOfWeek)) {
+      console.log(`❌ Not available on ${dayOfWeek}`)
+      return res.json({
+        success: true,
+        availableSlots: [],
+        message: `Not available on ${dayOfWeek}s`,
+      })
+    }
+
+    // Get existing bookings for this date and slot
+    const startOfDay = new Date(date)
+    startOfDay.setHours(0, 0, 0, 0)
+    const endOfDay = new Date(date)
+    endOfDay.setHours(23, 59, 59, 999)
+
+    console.log("🔍 Querying existing bookings:", {
+      slotId,
+      dateRange: {
+        start: startOfDay.toISOString(),
+        end: endOfDay.toISOString(),
+      },
+    })
+
     const existingBookings = await Booking.find({
       slotId,
-      scheduledDate: requestedDate,
+      scheduledDate: {
+        $gte: startOfDay,
+        $lte: endOfDay,
+      },
       status: { $in: ["pending", "confirmed"] },
     }).select("scheduledTime")
 
     const bookedTimes = existingBookings.map((booking) => booking.scheduledTime)
+    console.log("📋 Existing bookings:", existingBookings.length)
+    console.log("⏰ Booked times:", bookedTimes)
 
     // Generate available time slots
     const availableSlots = []
-    for (const timeSlot of slot.availableTimes) {
-      const [startHour, startMinute] = timeSlot.startTime.split(":").map(Number)
-      const [endHour, endMinute] = timeSlot.endTime.split(":").map(Number)
+
+    if (!slot.availableTimes || slot.availableTimes.length === 0) {
+      console.log("❌ No available times configured")
+      return res.json({
+        success: true,
+        availableSlots: [],
+        message: "No time slots configured",
+      })
+    }
+
+    console.log("=== TIME SLOT GENERATION ===")
+    console.log("Available times from database:", JSON.stringify(slot.availableTimes, null, 2))
+
+    for (let i = 0; i < slot.availableTimes.length; i++) {
+      const timeSlot = slot.availableTimes[i]
+      console.log(`🔄 Processing time slot ${i + 1}/${slot.availableTimes.length}:`, JSON.stringify(timeSlot, null, 2))
+
+      if (!timeSlot.startTime || !timeSlot.endTime) {
+        console.log(`❌ Invalid time slot - missing startTime or endTime`)
+        continue
+      }
+
+      // Parse start and end times - handle both HH:MM and H:MM formats
+      const startTimeParts = timeSlot.startTime.split(":")
+      const endTimeParts = timeSlot.endTime.split(":")
+
+      if (startTimeParts.length !== 2 || endTimeParts.length !== 2) {
+        console.log(`❌ Invalid time format: ${timeSlot.startTime} - ${timeSlot.endTime}`)
+        continue
+      }
+
+      const startHour = Number.parseInt(startTimeParts[0], 10)
+      const startMinute = Number.parseInt(startTimeParts[1], 10)
+      const endHour = Number.parseInt(endTimeParts[0], 10)
+      const endMinute = Number.parseInt(endTimeParts[1], 10)
+
+      console.log("🔢 Parsed time values:", {
+        startHour,
+        startMinute,
+        endHour,
+        endMinute,
+      })
+
+      if (isNaN(startHour) || isNaN(startMinute) || isNaN(endHour) || isNaN(endMinute)) {
+        console.log(`❌ Invalid time values: ${timeSlot.startTime} - ${timeSlot.endTime}`)
+        continue
+      }
 
       let currentTime = startHour * 60 + startMinute // Convert to minutes
       const endTime = endHour * 60 + endMinute
 
-      while (currentTime + slot.duration <= endTime) {
-        const timeString = `${Math.floor(currentTime / 60)
-          .toString()
-          .padStart(2, "0")}:${(currentTime % 60).toString().padStart(2, "0")}`
+      console.log(`⏱️  Time range: ${currentTime} to ${endTime} minutes (duration: ${slot.duration})`)
 
-        if (!bookedTimes.includes(timeString)) {
+      if (currentTime >= endTime) {
+        console.log(`❌ Invalid time range: start time >= end time`)
+        continue
+      }
+
+      // Generate slots within this time range
+      let slotsGenerated = 0
+      while (currentTime + slot.duration <= endTime) {
+        const hours = Math.floor(currentTime / 60)
+        const minutes = currentTime % 60
+        const timeString = `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`
+
+        const isBooked = bookedTimes.includes(timeString)
+        console.log(`    ⏰ Time ${timeString}: ${isBooked ? "❌ BOOKED" : "✅ AVAILABLE"}`)
+
+        if (!isBooked) {
           availableSlots.push(timeString)
+          slotsGenerated++
         }
 
         currentTime += slot.duration
       }
+
+      console.log(`✅ Generated ${slotsGenerated} slots from this time range`)
     }
 
-    res.json({
+    console.log("=== FINAL RESULT ===")
+    console.log("✅ Available slots:", availableSlots)
+    console.log("📊 Total available:", availableSlots.length)
+
+    const response = {
       success: true,
       availableSlots: availableSlots.sort(),
       bookedSlots: bookedTimes.sort(),
+      debug: {
+        requestedDate: requestedDate.toISOString(),
+        dayOfWeek,
+        daysDifference,
+        availableDays: slot.availableDays,
+        availableTimes: slot.availableTimes,
+        existingBookings: existingBookings.length,
+        duration: slot.duration,
+        totalSlotsGenerated: availableSlots.length,
+      },
+    }
+
+    console.log("📤 Sending response:", JSON.stringify(response, null, 2))
+
+    res.json(response)
+  } catch (error) {
+    console.error("❌ Get available slots error:", error)
+    console.error("❌ Error stack:", error.stack)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: error.message,
+    })
+  }
+}
+
+// @desc    Test endpoint to check slot data
+// @route   GET /api/bookings/test-slot/:slotId
+// @access  Public
+const testSlotData = async (req, res) => {
+  try {
+    const { slotId } = req.params
+
+    console.log("=== SLOT TEST START ===")
+    console.log("Testing slot ID:", slotId)
+
+    const slot = await DeveloperSlot.findById(slotId)
+
+    if (!slot) {
+      console.log("❌ Slot not found")
+      return res.json({
+        success: false,
+        message: "Slot not found",
+        slotId,
+      })
+    }
+
+    console.log("✅ Slot found:", {
+      id: slot._id,
+      title: slot.title,
+      isActive: slot.isActive,
+      availableDays: slot.availableDays,
+      availableTimes: slot.availableTimes,
+      duration: slot.duration,
+      advanceBookingDays: slot.advanceBookingDays,
+    })
+
+    res.json({
+      success: true,
+      slot: {
+        id: slot._id,
+        title: slot.title,
+        isActive: slot.isActive,
+        availableDays: slot.availableDays,
+        availableTimes: slot.availableTimes,
+        duration: slot.duration,
+        advanceBookingDays: slot.advanceBookingDays,
+      },
     })
   } catch (error) {
-    console.error("Get available slots error:", error)
+    console.error("❌ Test slot error:", error)
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -744,4 +972,5 @@ module.exports = {
   addReview,
   addFeedback,
   getAvailableSlotsForSlot,
+  testSlotData,
 }
