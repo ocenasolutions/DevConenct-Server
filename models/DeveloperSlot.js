@@ -149,15 +149,26 @@ developerSlotSchema.methods.isAvailableOnDate = function (date) {
 
 // Method to get available time slots for a specific date
 developerSlotSchema.methods.getAvailableTimeSlotsForDate = async function (date) {
-  if (!this.isAvailableOnDate(date)) {
+  // Ensure date is treated as UTC to avoid timezone issues
+  const targetDate = new Date(date + "T00:00:00.000Z")
+  const dayOfWeek = targetDate.toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" }).toLowerCase()
+
+  if (!this.availableDays.includes(dayOfWeek)) {
     return []
   }
 
   // Get existing bookings for this date
   const Booking = mongoose.model("Booking")
+  const startOfDay = new Date(targetDate)
+  const endOfDay = new Date(targetDate)
+  endOfDay.setUTCHours(23, 59, 59, 999)
+
   const existingBookings = await Booking.find({
     slotId: this._id,
-    scheduledDate: date,
+    scheduledDate: {
+      $gte: startOfDay,
+      $lte: endOfDay,
+    },
     status: { $in: ["pending", "confirmed"] },
   }).select("scheduledTime")
 

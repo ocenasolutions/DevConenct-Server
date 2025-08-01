@@ -117,6 +117,14 @@ const userSchema = new mongoose.Schema(
           message: "Website must be a valid URL",
         },
       },
+      calendlyUsername: {
+        type: String,
+        trim: true,
+        validate: {
+          validator: (v) => !v || /^[a-zA-Z0-9_-]+$/.test(v),
+          message: "Calendly username must contain only letters, numbers, hyphens, and underscores",
+        },
+      },
       ratings: {
         overall: {
           type: Number,
@@ -236,7 +244,7 @@ userSchema.pre("save", async function (next) {
 
 userSchema.pre("save", function (next) {
   let completed = 0
-  const total = 12 // Updated total to include ratings
+  const total = 13 // Updated total to include calendlyUsername
 
   if (this.name) completed++
   if (this.profile?.bio) completed++
@@ -247,6 +255,7 @@ userSchema.pre("save", function (next) {
   if (this.profile?.github) completed++
   if (this.profile?.linkedin) completed++
   if (this.profile?.portfolio || this.profile?.website) completed++
+  if (this.profile?.calendlyUsername) completed++
   if (this.preferences?.jobType && this.preferences.jobType.length > 0) completed++
   if (this.preferences?.salaryRange?.min && this.preferences?.salaryRange?.max) completed++
   if (

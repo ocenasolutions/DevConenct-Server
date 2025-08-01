@@ -654,7 +654,7 @@ const updateDeveloperRating = async (developerId) => {
 }
 
 // @desc    Get available slots for a developer slot
-// @route   GET /api/bookings/available-slots/:slotId
+// @route   GET /api/bookings/slot-availability/:slotId
 // @access  Public
 const getAvailableSlotsForSlot = async (req, res) => {
   try {
@@ -664,8 +664,6 @@ const getAvailableSlotsForSlot = async (req, res) => {
     console.log("=== AVAILABILITY CHECK START ===")
     console.log("Slot ID:", slotId)
     console.log("Requested Date:", date)
-    console.log("Request URL:", req.url)
-    console.log("Request method:", req.method)
 
     if (!date) {
       console.log("❌ No date parameter provided")
@@ -705,25 +703,21 @@ const getAvailableSlotsForSlot = async (req, res) => {
       isActive: slot.isActive,
     })
 
-    // Parse the requested date
+    // Parse the requested date - use local date parsing
     console.log("📅 Parsing requested date:", date)
     const requestedDate = new Date(date)
     const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    requestedDate.setHours(0, 0, 0, 0)
 
-    console.log("📅 Raw dates:", {
-      requestedDateRaw: requestedDate.toString(),
-      todayRaw: today.toString(),
+    console.log("📅 Date comparison:", {
+      requestedDate: requestedDate.toDateString(),
+      today: today.toDateString(),
     })
 
-    // Set both dates to start of day for accurate comparison
-    requestedDate.setHours(0, 0, 0, 0)
-    today.setHours(0, 0, 0, 0)
-
-    const daysDifference = Math.ceil((requestedDate - today) / (1000 * 60 * 60 * 24))
+    const daysDifference = Math.floor((requestedDate - today) / (1000 * 60 * 60 * 24))
 
     console.log("📅 Date validation:", {
-      requestedDate: requestedDate.toISOString(),
-      today: today.toISOString(),
       daysDifference,
       advanceBookingDays: slot.advanceBookingDays,
     })
@@ -748,7 +742,7 @@ const getAvailableSlotsForSlot = async (req, res) => {
       })
     }
 
-    // Get day of week
+    // Get day of week - use consistent local time
     const dayOfWeek = requestedDate.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase()
 
     console.log("📅 Day validation:", {
@@ -768,9 +762,8 @@ const getAvailableSlotsForSlot = async (req, res) => {
     }
 
     // Get existing bookings for this date and slot
-    const startOfDay = new Date(date)
-    startOfDay.setHours(0, 0, 0, 0)
-    const endOfDay = new Date(date)
+    const startOfDay = new Date(requestedDate)
+    const endOfDay = new Date(requestedDate)
     endOfDay.setHours(23, 59, 59, 999)
 
     console.log("🔍 Querying existing bookings:", {
@@ -818,7 +811,7 @@ const getAvailableSlotsForSlot = async (req, res) => {
         continue
       }
 
-      // Parse start and end times - handle both HH:MM and H:MM formats
+      // Parse start and end times
       const startTimeParts = timeSlot.startTime.split(":")
       const endTimeParts = timeSlot.endTime.split(":")
 
@@ -844,21 +837,22 @@ const getAvailableSlotsForSlot = async (req, res) => {
         continue
       }
 
-      let currentTime = startHour * 60 + startMinute // Convert to minutes
-      const endTime = endHour * 60 + endMinute
+      // Convert to minutes for easier calculation
+      let currentTimeMinutes = startHour * 60 + startMinute
+      const endTimeMinutes = endHour * 60 + endMinute
 
-      console.log(`⏱️  Time range: ${currentTime} to ${endTime} minutes (duration: ${slot.duration})`)
+      console.log(`⏱️  Time range: ${currentTimeMinutes} to ${endTimeMinutes} minutes (duration: ${slot.duration})`)
 
-      if (currentTime >= endTime) {
+      if (currentTimeMinutes >= endTimeMinutes) {
         console.log(`❌ Invalid time range: start time >= end time`)
         continue
       }
 
       // Generate slots within this time range
       let slotsGenerated = 0
-      while (currentTime + slot.duration <= endTime) {
-        const hours = Math.floor(currentTime / 60)
-        const minutes = currentTime % 60
+      while (currentTimeMinutes + slot.duration <= endTimeMinutes) {
+        const hours = Math.floor(currentTimeMinutes / 60)
+        const minutes = currentTimeMinutes % 60
         const timeString = `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`
 
         const isBooked = bookedTimes.includes(timeString)
@@ -869,7 +863,8 @@ const getAvailableSlotsForSlot = async (req, res) => {
           slotsGenerated++
         }
 
-        currentTime += slot.duration
+        // Move to next slot (use slot duration as increment)
+        currentTimeMinutes += slot.duration
       }
 
       console.log(`✅ Generated ${slotsGenerated} slots from this time range`)

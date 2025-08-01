@@ -185,7 +185,12 @@ exports.deleteAccount = async (req, res) => {
 // Upload avatar
 exports.uploadAvatar = async (req, res) => {
   try {
-    const { avatar } = req.body
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No file uploaded",
+      })
+    }
 
     const user = await User.findById(req.user.userId)
     if (!user) {
@@ -195,13 +200,15 @@ exports.uploadAvatar = async (req, res) => {
       })
     }
 
-    user.avatar = avatar
+    // Save the file path
+    const avatarPath = `/uploads/avatars/${req.file.filename}`
+    user.avatar = avatarPath
     await user.save()
 
     res.json({
       success: true,
       message: "Avatar uploaded successfully",
-      avatar: user.avatar,
+      avatar: avatarPath,
     })
   } catch (error) {
     res.status(500).json({

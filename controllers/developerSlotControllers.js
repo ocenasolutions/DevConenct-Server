@@ -3,9 +3,6 @@ const User = require("../models/User")
 const Booking = require("../models/Booking")
 const mongoose = require("mongoose")
 
-// @desc    Create a new developer slot
-// @route   POST /api/developer-slots
-// @access  Private (Developer only)
 const createSlot = async (req, res) => {
   try {
     const {
@@ -23,7 +20,6 @@ const createSlot = async (req, res) => {
       tags,
     } = req.body
 
-    // Check if user is a developer
     if (req.user.role !== "developer") {
       return res.status(403).json({
         success: false,
@@ -82,9 +78,7 @@ const createSlot = async (req, res) => {
   }
 }
 
-// @desc    Get developer's slots
-// @route   GET /api/developer-slots
-// @access  Private (Developer only)
+
 const getMySlots = async (req, res) => {
   try {
     if (req.user.role !== "developer") {
@@ -129,9 +123,6 @@ const getMySlots = async (req, res) => {
   }
 }
 
-// @desc    Get public slots for a developer
-// @route   GET /api/developer-slots/public/:developerId
-// @access  Public
 const getPublicSlots = async (req, res) => {
   try {
     const { developerId } = req.params
@@ -202,7 +193,6 @@ const getPublicSlots = async (req, res) => {
   } catch (error) {
     console.error("Get public slots error:", error)
 
-    // Check if it's a MongoDB ObjectId error
     if (error.name === "CastError") {
       return res.status(400).json({
         success: false,
@@ -218,9 +208,6 @@ const getPublicSlots = async (req, res) => {
   }
 }
 
-// @desc    Update a slot
-// @route   PUT /api/developer-slots/:id
-// @access  Private (Developer only)
 const updateSlot = async (req, res) => {
   try {
     const { id } = req.params
@@ -300,9 +287,6 @@ const updateSlot = async (req, res) => {
   }
 }
 
-// @desc    Delete a slot
-// @route   DELETE /api/developer-slots/:id
-// @access  Private (Developer only)
 const deleteSlot = async (req, res) => {
   try {
     const { id } = req.params
@@ -313,7 +297,6 @@ const deleteSlot = async (req, res) => {
       userRole: req.user.role,
     })
 
-    // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
@@ -329,7 +312,6 @@ const deleteSlot = async (req, res) => {
       })
     }
 
-    // Check if user owns this slot - convert both to strings for comparison
     if (slot.developerId.toString() !== req.user.userId.toString()) {
       console.log("Access denied - user does not own this slot")
       return res.status(403).json({
@@ -338,7 +320,6 @@ const deleteSlot = async (req, res) => {
       })
     }
 
-    // Check if there are any pending or confirmed bookings
     const activeBookings = await Booking.countDocuments({
       slotId: id,
       status: { $in: ["pending", "confirmed"] },
@@ -369,9 +350,6 @@ const deleteSlot = async (req, res) => {
   }
 }
 
-// @desc    Toggle slot status
-// @route   PATCH /api/developer-slots/:id/toggle
-// @access  Private (Developer only)
 const toggleSlotStatus = async (req, res) => {
   try {
     const { id } = req.params
@@ -382,7 +360,6 @@ const toggleSlotStatus = async (req, res) => {
       userRole: req.user.role,
     })
 
-    // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
@@ -408,7 +385,6 @@ const toggleSlotStatus = async (req, res) => {
       match: slot.developerId.toString() === req.user.userId.toString(),
     })
 
-    // Check if user owns this slot - convert both to strings for comparison
     if (slot.developerId.toString() !== req.user.userId.toString()) {
       console.log("Access denied:", {
         slotDeveloperId: slot.developerId.toString(),
@@ -445,9 +421,6 @@ const toggleSlotStatus = async (req, res) => {
   }
 }
 
-// @desc    Get slot statistics
-// @route   GET /api/developer-slots/stats
-// @access  Private (Developer only)
 const getSlotStats = async (req, res) => {
   try {
     if (req.user.role !== "developer") {
