@@ -46,6 +46,9 @@ const postSchema = new mongoose.Schema(
           type: Date,
           default: Date.now,
         },
+        editedAt: {
+          type: Date,
+        },
       },
     ],
     shares: [
@@ -54,18 +57,34 @@ const postSchema = new mongoose.Schema(
           type: mongoose.Schema.Types.ObjectId,
           ref: "User",
         },
-        createdAt: {
+        message: {
+          type: String,
+          maxlength: 500,
+        },
+        sharedAt: {
           type: Date,
           default: Date.now,
         },
       },
     ],
+    sharedPost: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Post",
+    },
+    isShared: {
+      type: Boolean,
+      default: false,
+    },
     visibility: {
       type: String,
       enum: ["public", "friends", "private"],
       default: "public",
     },
     tags: [String],
+    views: {
+      type: Number,
+      default: 0,
+    },
     isActive: {
       type: Boolean,
       default: true,
@@ -90,6 +109,11 @@ postSchema.virtual("commentCount").get(function () {
 postSchema.virtual("shareCount").get(function () {
   return this.shares.length
 })
+
+// Index for better query performance
+postSchema.index({ author: 1, createdAt: -1 })
+postSchema.index({ visibility: 1, createdAt: -1 })
+postSchema.index({ isActive: 1, createdAt: -1 })
 
 // Ensure virtual fields are serialized
 postSchema.set("toJSON", { virtuals: true })

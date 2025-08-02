@@ -13,5 +13,6 @@ router.post("/linkedin", authController.linkedinAuth)
 router.get("/me", authMiddleware, authController.getCurrentUser)
 router.post("/logout", authMiddleware, authController.logout)
 router.put("/password", authMiddleware, authController.changePassword)
+router.put("/role", authMiddleware, authController.updateRole)
 
 module.exports = router

@@ -2,6 +2,7 @@ const Post = require("../models/Post")
 const User = require("../models/User")
 const Connection = require("../models/Connection")
 const { createNotification } = require("./notificationControllers")
+const { emitToUser } = require("../utils/socketUtils")
 const AWS = require("aws-sdk")
 
 // Configure AWS S3
@@ -73,60 +74,102 @@ const createPost = async (req, res) => {
   }
 }
 
+// @desc    Get a single post
+// @route   GET /api/posts/:id
+// @access  Private
+const getPost = async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id)
+      .populate("author", "name avatar role")
+      .populate("likes.user", "name avatar")
+      .populate("comments.user", "name avatar")
+      .populate("shares.user", "name avatar")
+
+    if (!post || !post.isActive) {
+      return res.status(404).json({
+        success: false,
+        message: "Post not found",
+      })
+    }
+
+    // Check if user has permission to view this post
+    const userId = req.user.userId
+    if (post.visibility === "private" && post.author._id.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to view this post",
+      })
+    }
+
+    if (post.visibility === "friends" && post.author._id.toString() !== userId.toString()) {
+      // Check if users are connected
+      const connection = await Connection.findOne({
+        $or: [
+          { requester: userId, recipient: post.author._id, status: "accepted" },
+          { requester: post.author._id, recipient: userId, status: "accepted" },
+        ],
+      })
+
+      if (!connection) {
+        return res.status(403).json({
+          success: false,
+          message: "Not authorized to view this post",
+        })
+      }
+    }
+
+    res.json({
+      success: true,
+      post,
+    })
+  } catch (error) {
+    console.error("Get post error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
 // @desc    Get posts for feed
 // @route   GET /api/posts/feed
 // @access  Private
 const getFeed = async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query
+    const { page = 1, limit = 10, filter = "all" } = req.query
     const userId = req.user.userId
 
-    // Get user's connections
-    const connections = await Connection.find({
-      $or: [
-        { requester: userId, status: "accepted" },
-        { recipient: userId, status: "accepted" },
-      ],
-    })
+    const query = { isActive: true }
 
-    const connectedUserIds = connections.map((conn) =>
-      conn.requester.toString() === userId.toString() ? conn.recipient : conn.requester,
-    )
+    if (filter === "friends") {
+      // Get user's connections
+      const connections = await Connection.find({
+        $or: [
+          { requester: userId, status: "accepted" },
+          { recipient: userId, status: "accepted" },
+        ],
+      })
 
-    // Include user's own posts and connected users' posts
-    const allowedAuthors = [userId, ...connectedUserIds]
+      const connectedUserIds = connections.map((conn) =>
+        conn.requester.toString() === userId.toString() ? conn.recipient : conn.requester,
+      )
 
-    const posts = await Post.find({
-      $and: [
-        { isActive: true },
-        {
-          $or: [
-            { visibility: "public" },
-            { author: userId }, // User's own posts
-            { author: { $in: connectedUserIds }, visibility: "friends" },
-          ],
-        },
-      ],
-    })
+      query.author = { $in: connectedUserIds }
+    } else {
+      // For "all" filter, show public posts and user's own posts
+      query.$or = [{ visibility: "public" }, { author: userId }]
+    }
+
+    const posts = await Post.find(query)
       .populate("author", "name avatar role")
       .populate("likes.user", "name avatar")
       .populate("comments.user", "name avatar")
+      .populate("shares.user", "name avatar")
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
 
-    const total = await Post.countDocuments({
-      $and: [
-        { isActive: true },
-        {
-          $or: [
-            { visibility: "public" },
-            { author: userId },
-            { author: { $in: connectedUserIds }, visibility: "friends" },
-          ],
-        },
-      ],
-    })
+    const total = await Post.countDocuments(query)
 
     res.json({
       success: true,
@@ -162,6 +205,7 @@ const getMyPosts = async (req, res) => {
       .populate("author", "name avatar role")
       .populate("likes.user", "name avatar")
       .populate("comments.user", "name avatar")
+      .populate("shares.user", "name avatar")
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -216,15 +260,38 @@ const toggleLike = async (req, res) => {
 
       // Create notification for post author (if not self-like)
       if (post.author.toString() !== req.user.userId.toString()) {
-        await createNotification(post.author, "like", "New Like", `${req.user.name} liked your post`, {
-          postId: post._id,
-          userId: req.user.userId,
-        })
+        await createNotification(
+          post.author,
+          "like",
+          "New Like",
+          `${req.user.name} liked your post`,
+          {
+            postId: post._id,
+            userId: req.user.userId,
+          },
+          req,
+        )
       }
     }
 
     await post.save()
     await post.populate("likes.user", "name avatar")
+
+    // Emit real-time update to post author
+    if (!existingLike && post.author.toString() !== req.user.userId.toString()) {
+      const io = req.app.get("io")
+      if (io) {
+        emitToUser(io, post.author, "post_liked", {
+          postId: post._id,
+          likedBy: {
+            _id: req.user.userId,
+            name: req.user.name,
+            avatar: req.user.avatar,
+          },
+          likeCount: post.likes.length,
+        })
+      }
+    }
 
     res.json({
       success: true,
@@ -273,18 +340,37 @@ const addComment = async (req, res) => {
     await post.save()
     await post.populate("comments.user", "name avatar")
 
+    const newComment = post.comments[post.comments.length - 1]
+
     // Create notification for post author (if not self-comment)
     if (post.author.toString() !== req.user.userId.toString()) {
-      await createNotification(post.author, "comment", "New Comment", `${req.user.name} commented on your post`, {
-        postId: post._id,
-        userId: req.user.userId,
-      })
+      await createNotification(
+        post.author,
+        "comment",
+        "New Comment",
+        `${req.user.name} commented on your post`,
+        {
+          postId: post._id,
+          userId: req.user.userId,
+        },
+        req,
+      )
+
+      // Emit real-time update to post author
+      const io = req.app.get("io")
+      if (io) {
+        emitToUser(io, post.author, "post_commented", {
+          postId: post._id,
+          comment: newComment,
+          commentCount: post.comments.length,
+        })
+      }
     }
 
     res.json({
       success: true,
       message: "Comment added successfully",
-      comment: post.comments[post.comments.length - 1],
+      comment: newComment,
       commentCount: post.comments.length,
     })
   } catch (error) {
@@ -301,7 +387,8 @@ const addComment = async (req, res) => {
 // @access  Private
 const sharePost = async (req, res) => {
   try {
-    const post = await Post.findById(req.params.id)
+    const { message = "" } = req.body
+    const post = await Post.findById(req.params.id).populate("author", "name avatar")
 
     if (!post) {
       return res.status(404).json({
@@ -319,14 +406,92 @@ const sharePost = async (req, res) => {
       })
     }
 
-    post.shares.push({ user: req.user.userId })
+    // Add share to the original post
+    post.shares.push({
+      user: req.user.userId,
+      message: message.trim(),
+      sharedAt: new Date(),
+    })
     await post.save()
 
-    // Create notification for post author (if not self-share)
-    if (post.author.toString() !== req.user.userId.toString()) {
-      await createNotification(post.author, "share", "Post Shared", `${req.user.name} shared your post`, {
-        postId: post._id,
-        userId: req.user.userId,
+    // Create a new shared post
+    const sharedPost = new Post({
+      author: req.user.userId,
+      content: message.trim() || `Shared a post from ${post.author.name}`,
+      sharedPost: post._id,
+      visibility: "public",
+      isShared: true,
+    })
+
+    await sharedPost.save()
+    await sharedPost.populate([
+      { path: "author", select: "name avatar role" },
+      {
+        path: "sharedPost",
+        select: "content images author createdAt",
+        populate: {
+          path: "author",
+          select: "name avatar role",
+        },
+      },
+    ])
+
+    // Create notification for original post author (if not self-share)
+    if (post.author._id.toString() !== req.user.userId.toString()) {
+      await createNotification(
+        post.author._id,
+        "share",
+        "Post Shared",
+        `${req.user.name} shared your post`,
+        {
+          postId: post._id,
+          sharedPostId: sharedPost._id,
+          userId: req.user.userId,
+        },
+        req,
+      )
+
+      // Emit real-time update to post author
+      const io = req.app.get("io")
+      if (io) {
+        emitToUser(io, post.author._id, "post_shared", {
+          postId: post._id,
+          sharedPostId: sharedPost._id,
+          sharedBy: {
+            _id: req.user.userId,
+            name: req.user.name,
+            avatar: req.user.avatar,
+          },
+          shareCount: post.shares.length,
+          message: message.trim(),
+        })
+      }
+    }
+
+    // Notify user's connections about the shared post
+    const connections = await Connection.find({
+      $or: [
+        { requester: req.user.userId, status: "accepted" },
+        { recipient: req.user.userId, status: "accepted" },
+      ],
+    })
+
+    const connectedUserIds = connections.map((conn) =>
+      conn.requester.toString() === req.user.userId.toString() ? conn.recipient : conn.requester,
+    )
+
+    // Emit to connected users about new shared post
+    const io = req.app.get("io")
+    if (io) {
+      connectedUserIds.forEach((userId) => {
+        emitToUser(io, userId, "new_shared_post", {
+          post: sharedPost,
+          sharedBy: {
+            _id: req.user.userId,
+            name: req.user.name,
+            avatar: req.user.avatar,
+          },
+        })
       })
     }
 
@@ -334,9 +499,38 @@ const sharePost = async (req, res) => {
       success: true,
       message: "Post shared successfully",
       shareCount: post.shares.length,
+      sharedPost: sharedPost,
     })
   } catch (error) {
     console.error("Share post error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
+// @desc    Get post shares
+// @route   GET /api/posts/:id/shares
+// @access  Private
+const getPostShares = async (req, res) => {
+  try {
+    const post = await Post.findById(req.params.id).populate("shares.user", "name avatar role")
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: "Post not found",
+      })
+    }
+
+    res.json({
+      success: true,
+      shares: post.shares,
+      shareCount: post.shares.length,
+    })
+  } catch (error) {
+    console.error("Get post shares error:", error)
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -393,12 +587,164 @@ const deletePost = async (req, res) => {
   }
 }
 
+// @desc    Delete a comment
+// @route   DELETE /api/posts/:postId/comments/:commentId
+// @access  Private
+const deleteComment = async (req, res) => {
+  try {
+    const { postId, commentId } = req.params
+    const post = await Post.findById(postId)
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: "Post not found",
+      })
+    }
+
+    const comment = post.comments.id(commentId)
+    if (!comment) {
+      return res.status(404).json({
+        success: false,
+        message: "Comment not found",
+      })
+    }
+
+    // Check if user is the comment author or post author
+    if (
+      comment.user.toString() !== req.user.userId.toString() &&
+      post.author.toString() !== req.user.userId.toString()
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to delete this comment",
+      })
+    }
+
+    post.comments.pull(commentId)
+    await post.save()
+
+    res.json({
+      success: true,
+      message: "Comment deleted successfully",
+      commentCount: post.comments.length,
+    })
+  } catch (error) {
+    console.error("Delete comment error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
+// @desc    Edit a comment
+// @route   PUT /api/posts/:postId/comments/:commentId
+// @access  Private
+const editComment = async (req, res) => {
+  try {
+    const { postId, commentId } = req.params
+    const { content } = req.body
+
+    if (!content || content.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Comment content is required",
+      })
+    }
+
+    const post = await Post.findById(postId)
+
+    if (!post) {
+      return res.status(404).json({
+        success: false,
+        message: "Post not found",
+      })
+    }
+
+    const comment = post.comments.id(commentId)
+    if (!comment) {
+      return res.status(404).json({
+        success: false,
+        message: "Comment not found",
+      })
+    }
+
+    // Check if user is the comment author
+    if (comment.user.toString() !== req.user.userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to edit this comment",
+      })
+    }
+
+    comment.content = content.trim()
+    comment.editedAt = new Date()
+    await post.save()
+    await post.populate("comments.user", "name avatar")
+
+    res.json({
+      success: true,
+      message: "Comment updated successfully",
+      comment: comment,
+    })
+  } catch (error) {
+    console.error("Edit comment error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
+// @desc    Get post statistics for user
+// @route   GET /api/posts/my-stats
+// @access  Private
+const getMyStats = async (req, res) => {
+  try {
+    const userId = req.user.userId
+
+    const posts = await Post.find({ author: userId, isActive: true })
+
+    const stats = {
+      totalPosts: posts.length,
+      totalLikes: posts.reduce((sum, post) => sum + post.likes.length, 0),
+      totalComments: posts.reduce((sum, post) => sum + post.comments.length, 0),
+      totalShares: posts.reduce((sum, post) => sum + post.shares.length, 0),
+      totalViews: posts.reduce((sum, post) => sum + (post.views || 0), 0),
+      averageEngagement:
+        posts.length > 0
+          ? (
+              posts.reduce((sum, post) => sum + post.likes.length + post.comments.length + post.shares.length, 0) /
+              posts.length
+            ).toFixed(2)
+          : 0,
+    }
+
+    res.json({
+      success: true,
+      stats,
+    })
+  } catch (error) {
+    console.error("Get my stats error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
 module.exports = {
   createPost,
+  getPost,
   getFeed,
   getMyPosts,
   toggleLike,
   addComment,
   sharePost,
+  getPostShares,
   deletePost,
+  deleteComment,
+  editComment,
+  getMyStats,
 }

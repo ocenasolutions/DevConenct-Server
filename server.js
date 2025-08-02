@@ -5,7 +5,6 @@ const dotenv = require("dotenv")
 const http = require("http")
 const socketIo = require("socket.io")
 const jwt = require("jsonwebtoken")
-const path = require("path")
 
 // Load environment variables
 dotenv.config()
@@ -17,17 +16,13 @@ const bookingRoutes = require("./routes/bookingRoutes")
 const developerSlotRoutes = require("./routes/developerSlotRoutes")
 const notificationRoutes = require("./routes/notificationRoutes")
 const chatRoutes = require("./routes/chatRoutes")
-
-const Message = require("./models/Message")
-const User = require("./models/User")
-
 const postRoutes = require("./routes/postRoutes")
-const connectionRoutes = require("./routes/connectionRoutes") 
+const connectionRoutes = require("./routes/connectionRoutes")
 
 const app = express()
 const server = http.createServer(app)
 
-// Socket.io setup with CORS
+// Socket.io setup
 const io = socketIo(server, {
   cors: {
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -36,173 +31,82 @@ const io = socketIo(server, {
   },
 })
 
+// Store connected users
+const connectedUsers = new Map()
+
+// Socket authentication middleware
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token
+    if (!token) {
+      return next(new Error("Authentication error"))
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    const User = require("./models/User")
+    const user = await User.findById(decoded.userId).select("-password")
+
+    if (!user) {
+      return next(new Error("User not found"))
+    }
+
+    socket.userId = user._id.toString()
+    socket.user = user
+    next()
+  } catch (error) {
+    next(new Error("Authentication error"))
+  }
+})
+
+// Socket connection handling
+io.on("connection", (socket) => {
+  console.log(`User ${socket.user.name} connected: ${socket.id}`)
+
+  // Store user connection
+  connectedUsers.set(socket.userId, socket.id)
+  socket.join(`user_${socket.userId}`)
+
+  // Handle disconnection
+  socket.on("disconnect", () => {
+    console.log(`User ${socket.user.name} disconnected: ${socket.id}`)
+    connectedUsers.delete(socket.userId)
+  })
+
+  // Handle typing events for chat
+  socket.on("typing", (data) => {
+    socket.to(`chat_${data.chatId}`).emit("user_typing", {
+      userId: socket.userId,
+      userName: socket.user.name,
+      isTyping: data.isTyping,
+    })
+  })
+
+  // Handle joining chat rooms
+  socket.on("join_chat", (chatId) => {
+    socket.join(`chat_${chatId}`)
+    console.log(`User ${socket.user.name} joined chat: ${chatId}`)
+  })
+
+  // Handle leaving chat rooms
+  socket.on("leave_chat", (chatId) => {
+    socket.leave(`chat_${chatId}`)
+    console.log(`User ${socket.user.name} left chat: ${chatId}`)
+  })
+})
+
+// Make io accessible to routes
+app.set("io", io)
+app.set("connectedUsers", connectedUsers)
+
+// Middleware
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
     credentials: true,
   }),
 )
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
-
-app.use("/uploads", express.static(path.join(__dirname, "uploads")))
-
-mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/devconnect", {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((error) => {
-    console.error("MongoDB connection error:", error)
-    process.exit(1)
-  })
-
-// Socket.io authentication middleware
-io.use(async (socket, next) => {
-  try {
-    const token = socket.handshake.auth.token
-    const userId = socket.handshake.auth.userId
-
-    if (!token) {
-      return next(new Error("Authentication error: No token provided"))
-    }
-
-    // Verify JWT token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET)
-
-    // Get user from database
-    const user = await User.findById(decoded.userId || decoded.id).select("-password")
-
-    if (!user) {
-      return next(new Error("Authentication error: User not found"))
-    }
-
-    // Attach user to socket
-    socket.userId = user._id.toString()
-    socket.user = user
-
-    console.log(`User authenticated: ${user.name} (${user._id})`)
-    next()
-  } catch (error) {
-    console.error("Socket authentication error:", error.message)
-    next(new Error("Authentication error: Invalid token"))
-  }
-})
-
-// Store online users
-const onlineUsers = new Map()
-
-io.on("connection", (socket) => {
-  console.log(`User connected: ${socket.user.name} (${socket.userId})`)
-
-  // Add user to online users
-  onlineUsers.set(socket.userId, {
-    socketId: socket.id,
-    user: socket.user,
-    lastSeen: new Date(),
-  })
-
-  // Join user to their own room
-  socket.join(socket.userId)
-
-  // Broadcast online users to all clients
-  io.emit("onlineUsers", Array.from(onlineUsers.keys()))
-
-  // Notify others that user came online
-  socket.broadcast.emit("userOnline", socket.userId)
-
-  // Handle sending messages
-  socket.on("sendMessage", async (messageData) => {
-    try {
-      console.log("Received sendMessage event:", messageData)
-
-      if (!messageData || !messageData.receiver || !messageData.content) {
-        console.error("Invalid message data:", messageData)
-        socket.emit("messageError", { error: "Invalid message data" })
-        return
-      }
-
-      const receiverId = messageData.receiver._id || messageData.receiver
-
-      // Emit to receiver
-      socket.to(receiverId).emit("newMessage", messageData)
-
-      // Emit delivery confirmation to sender
-      socket.emit("messageDelivered", {
-        messageId: messageData._id,
-        timestamp: new Date(),
-      })
-
-      console.log(`Message sent from ${socket.userId} to ${receiverId}`)
-    } catch (error) {
-      console.error("Error handling sendMessage:", error)
-      socket.emit("messageError", { error: "Failed to send message" })
-    }
-  })
-
-  // Handle typing indicators
-  socket.on("typing", ({ receiverId, isTyping }) => {
-    try {
-      if (receiverId && typeof isTyping === "boolean") {
-        socket.to(receiverId).emit("typing", {
-          userId: socket.userId,
-          isTyping,
-        })
-        console.log(`Typing indicator: ${socket.userId} -> ${receiverId} (${isTyping})`)
-      }
-    } catch (error) {
-      console.error("Error handling typing:", error)
-    }
-  })
-
-  // Handle message read receipts
-  socket.on("messagesRead", async ({ otherUserId, readBy }) => {
-    try {
-      console.log(`Messages read by ${readBy} from ${otherUserId}`)
-
-      // Update messages in database
-      await Message.updateMany(
-        {
-          sender: otherUserId,
-          receiver: readBy,
-          read: false,
-        },
-        {
-          read: true,
-          readAt: new Date(),
-        },
-      )
-
-      // Notify the sender that their messages were read
-      socket.to(otherUserId).emit("messageRead", {
-        readBy,
-        timestamp: new Date(),
-      })
-    } catch (error) {
-      console.error("Error handling messagesRead:", error)
-    }
-  })
-
-  // Handle user disconnect
-  socket.on("disconnect", () => {
-    console.log(`User disconnected: ${socket.user.name} (${socket.userId})`)
-
-    // Remove user from online users
-    onlineUsers.delete(socket.userId)
-
-    // Broadcast updated online users list
-    io.emit("onlineUsers", Array.from(onlineUsers.keys()))
-
-    // Notify others that user went offline
-    socket.broadcast.emit("userOffline", socket.userId)
-  })
-
-  // Handle connection errors
-  socket.on("error", (error) => {
-    console.error(`Socket error for user ${socket.userId}:`, error)
-  })
-})
+app.use(express.json({ limit: "10mb" }))
+app.use(express.urlencoded({ extended: true, limit: "10mb" }))
 
 // Routes
 app.use("/api/auth", authRoutes)
@@ -216,16 +120,20 @@ app.use("/api/connections", connectionRoutes)
 
 // Health check route
 app.get("/api/health", (req, res) => {
-  res.json({ status: "OK", timestamp: new Date().toISOString() })
+  res.json({
+    status: "OK",
+    timestamp: new Date().toISOString(),
+    connectedUsers: connectedUsers.size,
+  })
 })
 
 // Error handling middleware
-app.use((error, req, res, next) => {
-  console.error("Server error:", error)
+app.use((err, req, res, next) => {
+  console.error(err.stack)
   res.status(500).json({
     success: false,
-    message: "Internal server error",
-    error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    message: "Something went wrong!",
+    error: process.env.NODE_ENV === "development" ? err.message : undefined,
   })
 })
 
@@ -237,28 +145,26 @@ app.use("*", (req, res) => {
   })
 })
 
-const PORT = process.env.PORT || 5000
-
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-  console.log(`Socket.io server ready`)
-})
+// Database connection
+mongoose
+  .connect(process.env.MONGODB_URI)
+  .then(() => {
+    console.log("Connected to MongoDB")
+    const PORT = process.env.PORT || 5000
+    server.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`)
+    })
+  })
+  .catch((error) => {
+    console.error("Database connection error:", error)
+    process.exit(1)
+  })
 
 // Graceful shutdown
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down gracefully")
   server.close(() => {
-    console.log("Process terminated")
     mongoose.connection.close()
+    process.exit(0)
   })
 })
-
-process.on("SIGINT", () => {
-  console.log("SIGINT received, shutting down gracefully")
-  server.close(() => {
-    console.log("Process terminated")
-    mongoose.connection.close()
-  })
-})
-
-module.exports = { app, server, io }

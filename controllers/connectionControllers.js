@@ -1,13 +1,14 @@
 const Connection = require("../models/Connection")
 const User = require("../models/User")
 const { createNotification } = require("./notificationControllers")
+const { emitToUser } = require("../utils/socketUtils")
 
 // @desc    Send friend request
-// @route   POST /api/connections/request
+// @route   POST /api/connections/send-request
 // @access  Private
 const sendConnectionRequest = async (req, res) => {
   try {
-    const { recipientId } = req.body
+    const { userId: recipientId } = req.body
     const requesterId = req.user.userId
 
     if (requesterId === recipientId) {
@@ -58,6 +59,10 @@ const sendConnectionRequest = async (req, res) => {
     })
 
     await connection.save()
+    await connection.populate([
+      { path: "requester", select: "name avatar role" },
+      { path: "recipient", select: "name avatar role" },
+    ])
 
     // Create notification for recipient
     await createNotification(
@@ -66,7 +71,22 @@ const sendConnectionRequest = async (req, res) => {
       "New Connection Request",
       `${req.user.name} sent you a connection request`,
       { connectionId: connection._id, userId: requesterId },
+      req,
     )
+
+    // Emit real-time notification
+    const io = req.app.get("io")
+    if (io) {
+      emitToUser(io, recipientId, "friend_request_received", {
+        connection,
+        from: {
+          _id: req.user.userId,
+          name: req.user.name,
+          avatar: req.user.avatar,
+          role: req.user.role,
+        },
+      })
+    }
 
     res.status(201).json({
       success: true,
@@ -99,6 +119,8 @@ const respondToConnectionRequest = async (req, res) => {
     }
 
     const connection = await Connection.findById(connectionId)
+      .populate("requester", "name avatar role")
+      .populate("recipient", "name avatar role")
 
     if (!connection) {
       return res.status(404).json({
@@ -108,7 +130,7 @@ const respondToConnectionRequest = async (req, res) => {
     }
 
     // Check if user is the recipient
-    if (connection.recipient.toString() !== userId.toString()) {
+    if (connection.recipient._id.toString() !== userId.toString()) {
       return res.status(403).json({
         success: false,
         message: "Not authorized to respond to this request",
@@ -137,12 +159,28 @@ const respondToConnectionRequest = async (req, res) => {
         : `${req.user.name} declined your connection request`
 
     await createNotification(
-      connection.requester,
+      connection.requester._id,
       "connection_response",
       action === "accept" ? "Connection Accepted" : "Connection Declined",
       notificationMessage,
       { connectionId: connection._id, userId: userId },
+      req,
     )
+
+    // Emit real-time notification
+    const io = req.app.get("io")
+    if (io) {
+      emitToUser(io, connection.requester._id, "friend_request_responded", {
+        connection,
+        action,
+        respondedBy: {
+          _id: req.user.userId,
+          name: req.user.name,
+          avatar: req.user.avatar,
+          role: req.user.role,
+        },
+      })
+    }
 
     res.json({
       success: true,
@@ -218,6 +256,52 @@ const getConnections = async (req, res) => {
   }
 }
 
+// @desc    Get user's friends (accepted connections)
+// @route   GET /api/connections/friends
+// @access  Private
+const getFriends = async (req, res) => {
+  try {
+    const userId = req.user.userId
+
+    const connections = await Connection.find({
+      $or: [
+        { requester: userId, status: "accepted" },
+        { recipient: userId, status: "accepted" },
+      ],
+    })
+      .populate("requester", "name avatar role profile.location profile.bio profile.skills")
+      .populate("recipient", "name avatar role profile.location profile.bio profile.skills")
+      .sort({ connectionDate: -1 })
+
+    // Format connections to show the other user
+    const friends = connections.map((conn) => {
+      const otherUser = conn.requester._id.toString() === userId.toString() ? conn.recipient : conn.requester
+
+      return {
+        _id: otherUser._id,
+        connectionId: conn._id,
+        name: otherUser.name,
+        avatar: otherUser.avatar,
+        role: otherUser.role,
+        profile: otherUser.profile,
+        connectionDate: conn.connectionDate,
+        createdAt: conn.createdAt,
+      }
+    })
+
+    res.json({
+      success: true,
+      friends,
+    })
+  } catch (error) {
+    console.error("Get friends error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
 // @desc    Get pending connection requests
 // @route   GET /api/connections/requests
 // @access  Private
@@ -235,8 +319,8 @@ const getConnectionRequests = async (req, res) => {
     }
 
     const requests = await Connection.find(query)
-      .populate("requester", "name avatar role profile.location profile.bio")
-      .populate("recipient", "name avatar role profile.location profile.bio")
+      .populate("requester", "name avatar role profile.location profile.bio profile.skills")
+      .populate("recipient", "name avatar role profile.location profile.bio profile.skills")
       .sort({ createdAt: -1 })
 
     res.json({
@@ -245,6 +329,55 @@ const getConnectionRequests = async (req, res) => {
     })
   } catch (error) {
     console.error("Get connection requests error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
+// @desc    Get connection suggestions
+// @route   GET /api/connections/suggestions
+// @access  Private
+const getConnectionSuggestions = async (req, res) => {
+  try {
+    const userId = req.user.userId
+    const { limit = 10 } = req.query
+
+    // Get user's existing connections
+    const existingConnections = await Connection.find({
+      $or: [{ requester: userId }, { recipient: userId }],
+    })
+
+    const connectedUserIds = existingConnections.map((conn) =>
+      conn.requester.toString() === userId.toString() ? conn.recipient.toString() : conn.requester.toString(),
+    )
+
+    // Add current user to exclude list
+    connectedUserIds.push(userId.toString())
+
+    // Get current user's profile for matching
+    const currentUser = await User.findById(userId)
+
+    // Find potential connections based on:
+    // 1. Same role (developers with developers, recruiters with recruiters)
+    // 2. Similar skills (for developers)
+    // 3. Same location
+    // 4. Exclude already connected users
+    const suggestions = await User.find({
+      _id: { $nin: connectedUserIds },
+      isActive: true,
+    })
+      .select("name avatar role profile.location profile.bio profile.skills")
+      .limit(Number.parseInt(limit))
+      .sort({ createdAt: -1 })
+
+    res.json({
+      success: true,
+      suggestions,
+    })
+  } catch (error) {
+    console.error("Get connection suggestions error:", error)
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -303,11 +436,39 @@ const getConnectionStatus = async (req, res) => {
     const { userId: otherUserId } = req.params
     const userId = req.user.userId
 
-    const status = await Connection.getConnectionStatus(userId, otherUserId)
+    if (userId === otherUserId) {
+      return res.json({
+        success: true,
+        status: "self",
+      })
+    }
+
+    const connection = await Connection.findOne({
+      $or: [
+        { requester: userId, recipient: otherUserId },
+        { requester: otherUserId, recipient: userId },
+      ],
+    })
+
+    let status = "none"
+    if (connection) {
+      if (connection.status === "accepted") {
+        status = "connected"
+      } else if (connection.status === "pending") {
+        if (connection.requester.toString() === userId.toString()) {
+          status = "sent"
+        } else {
+          status = "received"
+        }
+      } else if (connection.status === "declined") {
+        status = "declined"
+      }
+    }
 
     res.json({
       success: true,
       status,
+      connectionId: connection?._id,
     })
   } catch (error) {
     console.error("Get connection status error:", error)
@@ -322,7 +483,9 @@ module.exports = {
   sendConnectionRequest,
   respondToConnectionRequest,
   getConnections,
+  getFriends,
   getConnectionRequests,
+  getConnectionSuggestions,
   removeConnection,
   getConnectionStatus,
 }
