@@ -18,9 +18,11 @@ const developerSlotRoutes = require("./routes/developerSlotRoutes")
 const notificationRoutes = require("./routes/notificationRoutes")
 const chatRoutes = require("./routes/chatRoutes")
 
-// Import models
 const Message = require("./models/Message")
 const User = require("./models/User")
+
+const postRoutes = require("./routes/postRoutes")
+const connectionRoutes = require("./routes/connectionRoutes") 
 
 const app = express()
 const server = http.createServer(app)
@@ -34,7 +36,6 @@ const io = socketIo(server, {
   },
 })
 
-// Middleware
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -44,10 +45,8 @@ app.use(
 app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 
-// Serve static files (for uploaded images)
 app.use("/uploads", express.static(path.join(__dirname, "uploads")))
 
-// Connect to MongoDB
 mongoose
   .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/devconnect", {
     useNewUrlParser: true,
@@ -212,6 +211,8 @@ app.use("/api/bookings", bookingRoutes)
 app.use("/api/developer-slots", developerSlotRoutes)
 app.use("/api/notifications", notificationRoutes)
 app.use("/api/chat", chatRoutes)
+app.use("/api/posts", postRoutes)
+app.use("/api/connections", connectionRoutes)
 
 // Health check route
 app.get("/api/health", (req, res) => {
