@@ -1,7 +1,6 @@
 const Connection = require("../models/Connection")
 const User = require("../models/User")
 const { createNotification } = require("./notificationControllers")
-const { emitToUser } = require("../utils/socketUtils")
 
 // @desc    Send friend request
 // @route   POST /api/connections/send-request
@@ -10,6 +9,8 @@ const sendConnectionRequest = async (req, res) => {
   try {
     const { userId: recipientId } = req.body
     const requesterId = req.user.userId
+
+    console.log("Connection request:", { requesterId, recipientId })
 
     if (requesterId === recipientId) {
       return res.status(400).json({
@@ -64,28 +65,39 @@ const sendConnectionRequest = async (req, res) => {
       { path: "recipient", select: "name avatar role" },
     ])
 
-    // Create notification for recipient
-    await createNotification(
-      recipientId,
-      "connection_request",
-      "New Connection Request",
-      `${req.user.name} sent you a connection request`,
-      { connectionId: connection._id, userId: requesterId },
-      req,
-    )
+    // Create notification for recipient (with error handling)
+    try {
+      await createNotification(
+        recipientId,
+        "connection_request",
+        "New Connection Request",
+        `${req.user.name} sent you a connection request`,
+        { connectionId: connection._id, userId: requesterId },
+        req,
+      )
+    } catch (notificationError) {
+      console.error("Error creating notification:", notificationError)
+      // Don't fail the request if notification fails
+    }
 
-    // Emit real-time notification
-    const io = req.app.get("io")
-    if (io) {
-      emitToUser(io, recipientId, "friend_request_received", {
-        connection,
-        from: {
-          _id: req.user.userId,
-          name: req.user.name,
-          avatar: req.user.avatar,
-          role: req.user.role,
-        },
-      })
+    // Emit real-time notification (with error handling)
+    try {
+      const io = req.app.get("io")
+      if (io) {
+        const { emitToUser } = require("../utils/socketUtils")
+        emitToUser(io, recipientId, "friend_request_received", {
+          connection,
+          from: {
+            _id: req.user.userId,
+            name: req.user.name,
+            avatar: req.user.avatar,
+            role: req.user.role,
+          },
+        })
+      }
+    } catch (socketError) {
+      console.error("Error emitting socket event:", socketError)
+      // Don't fail the request if socket fails
     }
 
     res.status(201).json({
@@ -97,7 +109,119 @@ const sendConnectionRequest = async (req, res) => {
     console.error("Send connection request error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Send connection request (alternative endpoint)
+// @route   POST /api/connections/send
+// @access  Private
+const sendConnection = async (req, res) => {
+  try {
+    const { receiverId } = req.body
+    const requesterId = req.user.userId
+
+    console.log("Connection request:", { requesterId, receiverId })
+
+    if (requesterId === receiverId) {
+      return res.status(400).json({
+        success: false,
+        message: "Cannot send connection request to yourself",
+      })
+    }
+
+    // Check if recipient exists
+    const recipient = await User.findById(receiverId)
+    if (!recipient) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      })
+    }
+
+    // Check if connection already exists
+    const existingConnection = await Connection.findOne({
+      $or: [
+        { requester: requesterId, recipient: receiverId },
+        { requester: receiverId, recipient: requesterId },
+      ],
+    })
+
+    if (existingConnection) {
+      let message = "Connection request already exists"
+      if (existingConnection.status === "accepted") {
+        message = "You are already connected"
+      } else if (existingConnection.status === "declined") {
+        message = "Connection request was declined"
+      } else if (existingConnection.status === "blocked") {
+        message = "Unable to send connection request"
+      }
+
+      return res.status(400).json({
+        success: false,
+        message,
+      })
+    }
+
+    // Create connection request
+    const connection = new Connection({
+      requester: requesterId,
+      recipient: receiverId,
+      status: "pending",
+    })
+
+    await connection.save()
+    await connection.populate([
+      { path: "requester", select: "name avatar role" },
+      { path: "recipient", select: "name avatar role" },
+    ])
+
+    // Create notification for recipient (with error handling)
+    try {
+      await createNotification(
+        receiverId,
+        "connection_request",
+        "New Connection Request",
+        `${req.user.name} sent you a connection request`,
+        { connectionId: connection._id, userId: requesterId },
+        req,
+      )
+    } catch (notificationError) {
+      console.error("Error creating notification:", notificationError)
+      // Don't fail the request if notification fails
+    }
+
+    // Emit real-time notification (with error handling)
+    try {
+      const io = req.app.get("io")
+      if (io) {
+        const { emitToUser } = require("../utils/socketUtils")
+        emitToUser(io, receiverId, "friend_request_received", {
+          connection,
+          from: {
+            _id: req.user.userId,
+            name: req.user.name,
+            avatar: req.user.avatar,
+            role: req.user.role,
+          },
+        })
+      }
+    } catch (socketError) {
+      console.error("Error emitting socket event:", socketError)
+      // Don't fail the request if socket fails
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Connection request sent successfully",
+      connection,
+    })
+  } catch (error) {
+    console.error("Send connection request error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
     })
   }
 }
@@ -152,34 +276,43 @@ const respondToConnectionRequest = async (req, res) => {
 
     await connection.save()
 
-    // Create notification for requester
-    const notificationMessage =
-      action === "accept"
-        ? `${req.user.name} accepted your connection request`
-        : `${req.user.name} declined your connection request`
+    // Create notification for requester (with error handling)
+    try {
+      const notificationMessage =
+        action === "accept"
+          ? `${req.user.name} accepted your connection request`
+          : `${req.user.name} declined your connection request`
 
-    await createNotification(
-      connection.requester._id,
-      "connection_response",
-      action === "accept" ? "Connection Accepted" : "Connection Declined",
-      notificationMessage,
-      { connectionId: connection._id, userId: userId },
-      req,
-    )
+      await createNotification(
+        connection.requester._id,
+        "connection_response",
+        action === "accept" ? "Connection Accepted" : "Connection Declined",
+        notificationMessage,
+        { connectionId: connection._id, userId: userId },
+        req,
+      )
+    } catch (notificationError) {
+      console.error("Error creating notification:", notificationError)
+    }
 
-    // Emit real-time notification
-    const io = req.app.get("io")
-    if (io) {
-      emitToUser(io, connection.requester._id, "friend_request_responded", {
-        connection,
-        action,
-        respondedBy: {
-          _id: req.user.userId,
-          name: req.user.name,
-          avatar: req.user.avatar,
-          role: req.user.role,
-        },
-      })
+    // Emit real-time notification (with error handling)
+    try {
+      const io = req.app.get("io")
+      if (io) {
+        const { emitToUser } = require("../utils/socketUtils")
+        emitToUser(io, connection.requester._id, "friend_request_responded", {
+          connection,
+          action,
+          respondedBy: {
+            _id: req.user.userId,
+            name: req.user.name,
+            avatar: req.user.avatar,
+            role: req.user.role,
+          },
+        })
+      }
+    } catch (socketError) {
+      console.error("Error emitting socket event:", socketError)
     }
 
     res.json({
@@ -191,7 +324,7 @@ const respondToConnectionRequest = async (req, res) => {
     console.error("Respond to connection request error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
@@ -251,7 +384,7 @@ const getConnections = async (req, res) => {
     console.error("Get connections error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
@@ -297,12 +430,68 @@ const getFriends = async (req, res) => {
     console.error("Get friends error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
 
-// @desc    Get pending connection requests
+// @desc    Get pending connection requests (received)
+// @route   GET /api/connections/pending
+// @access  Private
+const getPendingRequests = async (req, res) => {
+  try {
+    const userId = req.user.userId
+
+    const requests = await Connection.find({
+      recipient: userId,
+      status: "pending",
+    })
+      .populate("requester", "name avatar role profile.location profile.bio profile.skills")
+      .populate("recipient", "name avatar role profile.location profile.bio profile.skills")
+      .sort({ createdAt: -1 })
+
+    res.json({
+      success: true,
+      requests,
+    })
+  } catch (error) {
+    console.error("Get pending requests error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Get sent connection requests
+// @route   GET /api/connections/sent
+// @access  Private
+const getSentRequests = async (req, res) => {
+  try {
+    const userId = req.user.userId
+
+    const requests = await Connection.find({
+      requester: userId,
+      status: "pending",
+    })
+      .populate("requester", "name avatar role profile.location profile.bio profile.skills")
+      .populate("recipient", "name avatar role profile.location profile.bio profile.skills")
+      .sort({ createdAt: -1 })
+
+    res.json({
+      success: true,
+      requests,
+    })
+  } catch (error) {
+    console.error("Get sent requests error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Get pending connection requests (generic)
 // @route   GET /api/connections/requests
 // @access  Private
 const getConnectionRequests = async (req, res) => {
@@ -331,7 +520,7 @@ const getConnectionRequests = async (req, res) => {
     console.error("Get connection requests error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
@@ -380,7 +569,7 @@ const getConnectionSuggestions = async (req, res) => {
     console.error("Get connection suggestions error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
@@ -423,7 +612,7 @@ const removeConnection = async (req, res) => {
     console.error("Remove connection error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
@@ -474,16 +663,19 @@ const getConnectionStatus = async (req, res) => {
     console.error("Get connection status error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
+      message: "Server error: " + error.message,
     })
   }
 }
 
 module.exports = {
   sendConnectionRequest,
+  sendConnection,
   respondToConnectionRequest,
   getConnections,
   getFriends,
+  getPendingRequests,
+  getSentRequests,
   getConnectionRequests,
   getConnectionSuggestions,
   removeConnection,

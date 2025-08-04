@@ -1,16 +1,161 @@
 const Message = require("../models/Message")
 const User = require("../models/User")
-const mongoose = require("mongoose")
+const Connection = require("../models/Connection")
 
-// Get all conversations for a user
+// @desc    Send a message
+// @route   POST /api/messages/send
+// @access  Private
+const sendMessage = async (req, res) => {
+  try {
+    const { receiverId, content, messageType = "text" } = req.body
+    const senderId = req.user.userId
+
+    console.log("Sending message:", { senderId, receiverId, content })
+
+    if (!receiverId || !content) {
+      return res.status(400).json({
+        success: false,
+        message: "Receiver ID and content are required",
+      })
+    }
+
+    // Check if receiver exists
+    const receiver = await User.findById(receiverId)
+    if (!receiver) {
+      return res.status(404).json({
+        success: false,
+        message: "Receiver not found",
+      })
+    }
+
+    // Check if users are connected (optional - you might want to allow messaging without connection)
+    const connection = await Connection.findOne({
+      $or: [
+        { requester: senderId, recipient: receiverId, status: "accepted" },
+        { requester: receiverId, recipient: senderId, status: "accepted" },
+      ],
+    })
+
+    // Create message
+    const message = new Message({
+      sender: senderId,
+      receiver: receiverId,
+      content: content.trim(),
+      messageType,
+    })
+
+    await message.save()
+
+    // Populate message with user info
+    const populatedMessage = await Message.findById(message._id)
+      .populate("sender", "name email avatar role")
+      .populate("receiver", "name email avatar role")
+
+    // Emit real-time message via Socket.IO
+    try {
+      const io = req.app.get("io")
+      if (io) {
+        // Send to receiver
+        io.to(receiverId).emit("receive_message", populatedMessage)
+
+        // Send notification to receiver
+        io.to(receiverId).emit("message_notification", {
+          senderId,
+          senderName: req.user.name,
+          content: content.substring(0, 50) + (content.length > 50 ? "..." : ""),
+          messageId: message._id,
+        })
+      }
+    } catch (socketError) {
+      console.error("Socket error:", socketError)
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Message sent successfully",
+      data: populatedMessage,
+    })
+  } catch (error) {
+    console.error("Send message error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Get messages between two users
+// @route   GET /api/messages/:userId
+// @access  Private
+const getMessages = async (req, res) => {
+  try {
+    const { userId: otherUserId } = req.params
+    const { page = 1, limit = 50 } = req.query
+    const currentUserId = req.user.userId
+
+    console.log("Getting messages between:", { currentUserId, otherUserId })
+
+    const messages = await Message.find({
+      $or: [
+        { sender: currentUserId, receiver: otherUserId },
+        { sender: otherUserId, receiver: currentUserId },
+      ],
+    })
+      .populate("sender", "name email avatar role")
+      .populate("receiver", "name email avatar role")
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+
+    // Mark messages as read
+    await Message.updateMany(
+      {
+        sender: otherUserId,
+        receiver: currentUserId,
+        read: false,
+      },
+      {
+        read: true,
+        readAt: new Date(),
+      },
+    )
+
+    const total = await Message.countDocuments({
+      $or: [
+        { sender: currentUserId, receiver: otherUserId },
+        { sender: otherUserId, receiver: currentUserId },
+      ],
+    })
+
+    res.json({
+      success: true,
+      messages: messages.reverse(), // Reverse to show oldest first
+      pagination: {
+        currentPage: Number.parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalMessages: total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1,
+      },
+    })
+  } catch (error) {
+    console.error("Get messages error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Get user's conversations
+// @route   GET /api/messages/conversations
+// @access  Private
 const getConversations = async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId)
+    const userId = req.user.userId
 
-    console.log(`Getting conversations for user: ${userId}`)
-
-    // Aggregate conversations with last message and unread count
-    const conversations = await Message.aggregate([
+    // Get all messages where user is sender or receiver
+    const messages = await Message.aggregate([
       {
         $match: {
           $or: [{ sender: userId }, { receiver: userId }],
@@ -43,25 +188,23 @@ const getConversations = async (req, res) => {
           from: "users",
           localField: "_id",
           foreignField: "_id",
-          as: "userInfo",
+          as: "user",
         },
       },
       {
-        $unwind: "$userInfo",
+        $unwind: "$user",
       },
       {
         $project: {
-          _id: "$userInfo._id",
-          name: "$userInfo.name",
-          email: "$userInfo.email",
-          avatar: "$userInfo.avatar",
-          role: "$userInfo.role",
-          lastMessage: {
-            content: "$lastMessage.content",
-            createdAt: "$lastMessage.createdAt",
-            sender: "$lastMessage.sender",
-            receiver: "$lastMessage.receiver",
+          _id: 1,
+          user: {
+            _id: "$user._id",
+            name: "$user.name",
+            email: "$user.email",
+            avatar: "$user.avatar",
+            role: "$user.role",
           },
+          lastMessage: 1,
           unreadCount: 1,
         },
       },
@@ -70,133 +213,31 @@ const getConversations = async (req, res) => {
       },
     ])
 
-    console.log(`Found ${conversations.length} conversations`)
-
     res.json({
       success: true,
-      conversations,
+      conversations: messages,
     })
   } catch (error) {
     console.error("Get conversations error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: "Server error: " + error.message,
     })
   }
 }
 
-// Get messages between two users
-const getMessages = async (req, res) => {
-  try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId)
-    const otherUserId = new mongoose.Types.ObjectId(req.params.otherUserId)
-
-    console.log(`Getting messages between ${userId} and ${otherUserId}`)
-
-    const messages = await Message.find({
-      $or: [
-        { sender: userId, receiver: otherUserId },
-        { sender: otherUserId, receiver: userId },
-      ],
-    })
-      .populate("sender", "name email avatar role")
-      .populate("receiver", "name email avatar role")
-      .sort({ createdAt: 1 })
-
-    console.log(`Found ${messages.length} messages`)
-
-    res.json({
-      success: true,
-      messages,
-    })
-  } catch (error) {
-    console.error("Get messages error:", error)
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    })
-  }
-}
-
-// Send a message
-const sendMessage = async (req, res) => {
-  try {
-    const senderId = new mongoose.Types.ObjectId(req.user.userId)
-    const { receiverId, content } = req.body
-
-    console.log(`Sending message from ${senderId} to ${receiverId}: ${content}`)
-
-    if (!receiverId || !content) {
-      return res.status(400).json({
-        success: false,
-        message: "Receiver ID and content are required",
-      })
-    }
-
-    const receiverObjectId = new mongoose.Types.ObjectId(receiverId)
-
-    // Check if receiver exists
-    const receiver = await User.findById(receiverObjectId)
-    if (!receiver) {
-      console.error(`Receiver not found: ${receiverId}`)
-      return res.status(404).json({
-        success: false,
-        message: "Receiver not found",
-      })
-    }
-
-    // Get sender info
-    const sender = await User.findById(senderId)
-    if (!sender) {
-      console.error(`Sender not found: ${senderId}`)
-      return res.status(404).json({
-        success: false,
-        message: "Sender not found",
-      })
-    }
-
-    const message = new Message({
-      sender: senderId,
-      receiver: receiverObjectId,
-      content: content.trim(),
-    })
-
-    await message.save()
-    console.log(`Message saved with ID: ${message._id}`)
-
-    // Populate the message with full user info
-    const populatedMessage = await Message.findById(message._id)
-      .populate("sender", "name email avatar role")
-      .populate("receiver", "name email avatar role")
-
-    res.status(201).json({
-      success: true,
-      message: populatedMessage,
-    })
-  } catch (error) {
-    console.error("Send message error:", error)
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    })
-  }
-}
-
-// Mark messages as read
+// @desc    Mark messages as read
+// @route   PUT /api/messages/:userId/read
+// @access  Private
 const markMessagesAsRead = async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId)
-    const otherUserId = new mongoose.Types.ObjectId(req.params.otherUserId)
+    const { userId: senderId } = req.params
+    const receiverId = req.user.userId
 
-    console.log(`Marking messages as read from ${otherUserId} to ${userId}`)
-
-    const result = await Message.updateMany(
+    await Message.updateMany(
       {
-        sender: otherUserId,
-        receiver: userId,
+        sender: senderId,
+        receiver: receiverId,
         read: false,
       },
       {
@@ -205,34 +246,96 @@ const markMessagesAsRead = async (req, res) => {
       },
     )
 
-    console.log(`Marked ${result.modifiedCount} messages as read`)
+    // Emit read receipt via Socket.IO
+    try {
+      const io = req.app.get("io")
+      if (io) {
+        io.to(senderId).emit("messages_read", {
+          readBy: receiverId,
+          readAt: new Date(),
+        })
+      }
+    } catch (socketError) {
+      console.error("Socket error:", socketError)
+    }
 
     res.json({
       success: true,
       message: "Messages marked as read",
-      modifiedCount: result.modifiedCount,
     })
   } catch (error) {
     console.error("Mark messages as read error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+      message: "Server error: " + error.message,
     })
   }
 }
 
-// Get unread message count
+// @desc    Delete a message
+// @route   DELETE /api/messages/:messageId
+// @access  Private
+const deleteMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params
+    const userId = req.user.userId
+
+    const message = await Message.findById(messageId)
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        message: "Message not found",
+      })
+    }
+
+    // Check if user is the sender
+    if (message.sender.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to delete this message",
+      })
+    }
+
+    await Message.findByIdAndDelete(messageId)
+
+    // Emit message deletion via Socket.IO
+    try {
+      const io = req.app.get("io")
+      if (io) {
+        io.to(message.receiver.toString()).emit("message_deleted", {
+          messageId,
+          deletedBy: userId,
+        })
+      }
+    } catch (socketError) {
+      console.error("Socket error:", socketError)
+    }
+
+    res.json({
+      success: true,
+      message: "Message deleted successfully",
+    })
+  } catch (error) {
+    console.error("Delete message error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Get unread message count
+// @route   GET /api/messages/unread/count
+// @access  Private
 const getUnreadCount = async (req, res) => {
   try {
-    const userId = new mongoose.Types.ObjectId(req.user.userId)
+    const userId = req.user.userId
 
     const unreadCount = await Message.countDocuments({
       receiver: userId,
       read: false,
     })
-
-    console.log(`User ${userId} has ${unreadCount} unread messages`)
 
     res.json({
       success: true,
@@ -242,104 +345,16 @@ const getUnreadCount = async (req, res) => {
     console.error("Get unread count error:", error)
     res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
-    })
-  }
-}
-
-// Start a new conversation
-const startConversation = async (req, res) => {
-  try {
-    const senderId = new mongoose.Types.ObjectId(req.user.userId)
-    const { receiverId, content } = req.body
-
-    console.log(`Starting conversation from ${senderId} to ${receiverId}`)
-
-    if (!receiverId) {
-      return res.status(400).json({
-        success: false,
-        message: "Receiver ID is required",
-      })
-    }
-
-    const receiverObjectId = new mongoose.Types.ObjectId(receiverId)
-
-    // Check if receiver exists
-    const receiver = await User.findById(receiverObjectId)
-    if (!receiver) {
-      return res.status(404).json({
-        success: false,
-        message: "User not found",
-      })
-    }
-
-    // Check if conversation already exists
-    const existingMessage = await Message.findOne({
-      $or: [
-        { sender: senderId, receiver: receiverObjectId },
-        { sender: receiverObjectId, receiver: senderId },
-      ],
-    })
-
-    if (existingMessage) {
-      console.log("Conversation already exists")
-      return res.json({
-        success: true,
-        message: "Conversation already exists",
-        conversationExists: true,
-      })
-    }
-
-    // Create first message if content provided
-    if (content && content.trim()) {
-      const message = new Message({
-        sender: senderId,
-        receiver: receiverObjectId,
-        content: content.trim(),
-      })
-
-      await message.save()
-
-      const populatedMessage = await Message.findById(message._id)
-        .populate("sender", "name email avatar role")
-        .populate("receiver", "name email avatar role")
-
-      console.log(`Conversation started with message ID: ${message._id}`)
-
-      return res.status(201).json({
-        success: true,
-        message: populatedMessage,
-        conversationStarted: true,
-      })
-    }
-
-    res.json({
-      success: true,
-      message: "Conversation can be started",
-      receiver: {
-        _id: receiver._id,
-        name: receiver.name,
-        email: receiver.email,
-        avatar: receiver.avatar,
-        role: receiver.role,
-      },
-    })
-  } catch (error) {
-    console.error("Start conversation error:", error)
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
+      message: "Server error: " + error.message,
     })
   }
 }
 
 module.exports = {
-  getConversations,
-  getMessages,
   sendMessage,
+  getMessages,
+  getConversations,
   markMessagesAsRead,
+  deleteMessage,
   getUnreadCount,
-  startConversation,
 }

@@ -7,6 +7,7 @@ const authMiddleware = require("../middleware/authMiddleware")
 router.post("/register", authController.register)
 router.post("/login", authController.login)
 router.post("/google", authController.googleAuth)
+router.post("/google/callback", authController.googleCallback)
 router.post("/linkedin", authController.linkedinAuth)
 
 // Protected routes

@@ -1,6 +1,10 @@
 const User = require("../models/User")
 const jwt = require("jsonwebtoken")
 const bcrypt = require("bcryptjs")
+const { OAuth2Client } = require("google-auth-library")
+
+// Initialize Google OAuth client
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
 
 // Generate JWT token
 const generateToken = (userId) => {
@@ -262,6 +266,87 @@ const googleAuth = async (req, res) => {
   }
 }
 
+// @desc    Google OAuth Callback
+// @route   POST /api/auth/google/callback
+// @access  Public
+const googleCallback = async (req, res) => {
+  try {
+    const { code, role = "developer", isLogin = true } = req.body
+
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: "Authorization code is required",
+      })
+    }
+
+    // Exchange authorization code for tokens
+    const { tokens } = await googleClient.getToken(code)
+    googleClient.setCredentials(tokens)
+
+    // Get user info from Google
+    const ticket = await googleClient.verifyIdToken({
+      idToken: tokens.id_token,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    })
+
+    const payload = ticket.getPayload()
+    const { sub, email, name, picture } = payload
+
+    if (!email || !name) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid Google profile data",
+      })
+    }
+
+    // Check if user exists
+    let user = await User.findOne({
+      $or: [{ email: email.toLowerCase() }, { providerId: sub, authProvider: "google" }],
+    })
+
+    if (user) {
+      // Update existing user
+      user.lastLogin = new Date()
+      if (!user.avatar && picture) {
+        user.avatar = picture
+      }
+      await user.save()
+    } else {
+      // Create new user
+      user = await User.create({
+        name: name.trim(),
+        email: email.toLowerCase(),
+        avatar: picture || null,
+        authProvider: "google",
+        providerId: sub,
+        role: role || "developer",
+        isVerified: true,
+        lastLogin: new Date(),
+      })
+    }
+
+    // Generate JWT token
+    const jwtToken = generateToken(user._id)
+
+    // Remove password from response
+    const userResponse = user.toJSON()
+
+    res.json({
+      success: true,
+      message: "Google authentication successful",
+      token: jwtToken,
+      user: userResponse,
+    })
+  } catch (error) {
+    console.error("Google callback error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
 // @desc    LinkedIn OAuth
 // @route   POST /api/auth/linkedin
 // @access  Public
@@ -446,6 +531,7 @@ module.exports = {
   getCurrentUser,
   logout,
   googleAuth,
+  googleCallback,
   linkedinAuth,
   changePassword,
   updateRole,

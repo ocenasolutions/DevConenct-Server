@@ -7,12 +7,16 @@ const { uploadAvatar, handleUploadError } = require("../middleware/uploadMiddlew
 // Public routes
 router.get("/search", userController.searchUsers)
 router.get("/developers", userController.getDevelopers)
-router.get("/:id", userController.getUserById)
 
 // Protected routes
 router.use(authMiddleware)
 router.get("/profile/me", userController.getProfile)
+router.get("/profile/completion", userController.getProfileCompletion)
 router.put("/profile", userController.updateProfile)
 router.post("/avatar", uploadAvatar.single("avatar"), handleUploadError, userController.uploadAvatar)
+router.delete("/account", userController.deleteAccount)
+
+// Public routes
+router.get("/:id", userController.getUserById)
 
 module.exports = router

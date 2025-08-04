@@ -8,12 +8,15 @@ router.use(authMiddleware)
 
 // Connection routes
 router.post("/send-request", connectionController.sendConnectionRequest)
+router.post("/send", connectionController.sendConnection) // Alternative endpoint
 router.put("/:id/respond", connectionController.respondToConnectionRequest)
 router.delete("/:id", connectionController.removeConnection)
 
 // Get routes
 router.get("/", connectionController.getConnections)
 router.get("/friends", connectionController.getFriends)
+router.get("/pending", connectionController.getPendingRequests) // New endpoint
+router.get("/sent", connectionController.getSentRequests) // New endpoint
 router.get("/requests", connectionController.getConnectionRequests)
 router.get("/suggestions", connectionController.getConnectionSuggestions)
 router.get("/status/:userId", connectionController.getConnectionStatus)
