@@ -7,7 +7,7 @@ const { OAuth2Client } = require("google-auth-library")
 const googleClient = new OAuth2Client(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI || "https://melodic-sawine-ac9059.netlify.app/0/auth/google/callback",
+  process.env.GOOGLE_REDIRECT_URI || `${process.env.CLIENT_URL}/auth/google/callback`,
 )
 
 // Generate JWT token
@@ -551,6 +551,185 @@ const updateRole = async (req, res) => {
   }
 }
 
+const linkedinCallback = async (req, res) => {
+  try {
+    const { code, role = "developer", isLogin = true } = req.body
+
+    console.log("LinkedIn callback received:", { 
+      code: code ? "present" : "missing", 
+      codeLength: code ? code.length : 0,
+      role, 
+      isLogin 
+    })
+
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: "Authorization code is required",
+      })
+    }
+
+    // Verify environment variables
+    const clientId = process.env.LINKEDIN_CLIENT_ID
+    const clientSecret = process.env.LINKEDIN_CLIENT_SECRET
+    const redirectUri = process.env.LINKEDIN_REDIRECT_URI || `${process.env.CLIENT_URL}/auth/linkedin/callback`
+
+    console.log("LinkedIn OAuth config:", {
+      clientId: clientId ? `${clientId.substring(0, 8)}...` : "missing",
+      clientSecret: clientSecret ? "present" : "missing",
+      redirectUri
+    })
+
+    if (!clientId || !clientSecret) {
+      console.error("Missing LinkedIn OAuth credentials")
+      return res.status(500).json({
+        success: false,
+        message: "Server configuration error: Missing LinkedIn credentials",
+      })
+    }
+
+    // Exchange authorization code for access token
+    console.log("Exchanging code for token...")
+    const tokenResponse = await fetch("https://www.linkedin.com/oauth/v2/accessToken", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+      }),
+    })
+
+    console.log("Token response status:", tokenResponse.status)
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text()
+      console.error("LinkedIn token exchange failed:", errorText)
+      
+      let errorMessage = "Failed to exchange authorization code"
+      try {
+        const errorJson = JSON.parse(errorText)
+        errorMessage = errorJson.error_description || errorJson.error || errorMessage
+      } catch (e) {
+        // Error text is not JSON, use as is
+        errorMessage = errorText || errorMessage
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: errorMessage,
+      })
+    }
+
+    const tokenData = await tokenResponse.json()
+    console.log("Token data received:", {
+      access_token: tokenData.access_token ? "present" : "missing",
+      expires_in: tokenData.expires_in
+    })
+
+    const accessToken = tokenData.access_token
+
+    // Get user profile from LinkedIn using the correct endpoint
+    console.log("Fetching user profile...")
+    const profileResponse = await fetch("https://api.linkedin.com/v2/userinfo", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "X-Restli-Protocol-Version": "2.0.0"
+      },
+    })
+
+    console.log("Profile response status:", profileResponse.status)
+
+    if (!profileResponse.ok) {
+      const errorText = await profileResponse.text()
+      console.error("Failed to fetch LinkedIn profile:", errorText)
+      return res.status(400).json({
+        success: false,
+        message: "Failed to fetch user profile from LinkedIn",
+      })
+    }
+
+    const profile = await profileResponse.json()
+    console.log("LinkedIn profile received:", {
+      sub: profile.sub,
+      email: profile.email,
+      name: profile.name,
+      picture: profile.picture ? "present" : "missing"
+    })
+
+    const { sub, email, name, picture } = profile
+
+    if (!email || !name) {
+      console.error("Invalid LinkedIn profile data:", profile)
+      return res.status(400).json({
+        success: false,
+        message: "Invalid LinkedIn profile data - missing email or name",
+      })
+    }
+
+    // Check if user exists
+    let user = await User.findOne({
+      $or: [
+        { email: email.toLowerCase() }, 
+        { providerId: sub, authProvider: "linkedin" }
+      ],
+    })
+
+    if (user) {
+      // Update existing user
+      user.lastLogin = new Date()
+      if (!user.avatar && picture) {
+        user.avatar = picture
+      }
+      // Update provider info if missing
+      if (!user.providerId || !user.authProvider) {
+        user.providerId = sub
+        user.authProvider = "linkedin"
+      }
+      await user.save()
+      console.log("Updated existing LinkedIn user:", user.email)
+    } else {
+      // Create new user
+      user = await User.create({
+        name: name.trim(),
+        email: email.toLowerCase(),
+        avatar: picture || null,
+        authProvider: "linkedin",
+        providerId: sub,
+        role: role || "developer",
+        isVerified: true,
+        lastLogin: new Date(),
+      })
+      console.log("Created new LinkedIn user:", user.email)
+    }
+
+    // Generate JWT token
+    const jwtToken = generateToken(user._id)
+
+    // Remove password from response
+    const userResponse = user.toJSON()
+
+    console.log("LinkedIn authentication successful for:", user.email)
+
+    res.json({
+      success: true,
+      message: "LinkedIn authentication successful",
+      token: jwtToken,
+      user: userResponse,
+    })
+  } catch (error) {
+    console.error("LinkedIn callback error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
 module.exports = {
   register,
   login,
@@ -560,5 +739,6 @@ module.exports = {
   googleCallback,
   linkedinAuth,
   changePassword,
+  linkedinCallback,
   updateRole,
 }

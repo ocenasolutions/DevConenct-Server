@@ -3,17 +3,13 @@ const router = express.Router()
 const authController = require("../controllers/authControllers")
 const authMiddleware = require("../middleware/authMiddleware")
 
-// Test route
-router.get("/test", (req, res) => {
-  res.json({ success: true, message: "Auth routes working" })
-})
-
 // Public routes
 router.post("/register", authController.register)
 router.post("/login", authController.login)
 router.post("/google", authController.googleAuth)
 router.post("/google/callback", authController.googleCallback)
 router.post("/linkedin", authController.linkedinAuth)
+router.post("/linkedin/callback", authController.linkedinCallback) // Add this line
 
 // Protected routes
 router.get("/me", authMiddleware, authController.getCurrentUser)

@@ -3,13 +3,13 @@ const User = require("../models/User")
 const Connection = require("../models/Connection")
 const { createNotification } = require("./notificationControllers")
 const { emitToUser } = require("../utils/socketUtils")
-const AWS = require("aws-sdk")
+const cloudinary = require("cloudinary").v2
 
-// Configure AWS S3
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION,
+// Configure Cloudinary
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 })
 
 // @desc    Create a new post
@@ -31,21 +31,33 @@ const createPost = async (req, res) => {
     // Handle image uploads if any
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
-        const key = `posts/${req.user.userId}/${Date.now()}-${file.originalname}`
+        try {
+          // Convert buffer to base64
+          const base64String = file.buffer.toString("base64")
+          const dataURI = `data:${file.mimetype};base64,${base64String}`
 
-        const uploadParams = {
-          Bucket: process.env.AWS_S3_BUCKET,
-          Key: key,
-          Body: file.buffer,
-          ContentType: file.mimetype,
-          ACL: "public-read",
+          // Upload to Cloudinary
+          const result = await cloudinary.uploader.upload(dataURI, {
+            folder: `rite/posts/${req.user.userId}`,
+            resource_type: "auto",
+            transformation: [
+              { width: 1200, height: 1200, crop: "limit" },
+              { quality: "auto" },
+              { fetch_format: "auto" },
+            ],
+          })
+
+          images.push({
+            url: result.secure_url,
+            publicId: result.public_id,
+          })
+        } catch (uploadError) {
+          console.error("Cloudinary upload error:", uploadError)
+          return res.status(500).json({
+            success: false,
+            message: "Error uploading image",
+          })
         }
-
-        const result = await s3.upload(uploadParams).promise()
-        images.push({
-          url: result.Location,
-          key: key,
-        })
       }
     }
 
@@ -118,6 +130,12 @@ const getPost = async (req, res) => {
       }
     }
 
+    // Increment view count if not the author
+    if (post.author._id.toString() !== userId.toString()) {
+      post.views = (post.views || 0) + 1
+      await post.save()
+    }
+
     res.json({
       success: true,
       post,
@@ -131,7 +149,7 @@ const getPost = async (req, res) => {
   }
 }
 
-// @desc    Get posts for feed
+// @desc    Get posts for feed (Dashboard)
 // @route   GET /api/posts/feed
 // @access  Private
 const getFeed = async (req, res) => {
@@ -154,9 +172,13 @@ const getFeed = async (req, res) => {
         conn.requester.toString() === userId.toString() ? conn.recipient : conn.requester,
       )
 
-      query.author = { $in: connectedUserIds }
+      // Show posts from connected friends and user's own posts
+      query.$or = [
+        { author: { $in: connectedUserIds }, visibility: { $in: ["public", "friends"] } },
+        { author: userId },
+      ]
     } else {
-      // For "all" filter, show public posts and user's own posts
+      // For "all" filter, show public posts from everyone and user's own posts
       query.$or = [{ visibility: "public" }, { author: userId }]
     }
 
@@ -165,6 +187,13 @@ const getFeed = async (req, res) => {
       .populate("likes.user", "name avatar")
       .populate("comments.user", "name avatar")
       .populate("shares.user", "name avatar")
+      .populate({
+        path: "sharedPost",
+        populate: {
+          path: "author",
+          select: "name avatar role",
+        },
+      })
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -206,6 +235,13 @@ const getMyPosts = async (req, res) => {
       .populate("likes.user", "name avatar")
       .populate("comments.user", "name avatar")
       .populate("shares.user", "name avatar")
+      .populate({
+        path: "sharedPost",
+        populate: {
+          path: "author",
+          select: "name avatar role",
+        },
+      })
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -560,16 +596,15 @@ const deletePost = async (req, res) => {
       })
     }
 
-    // Delete images from S3
+    // Delete images from Cloudinary
     if (post.images && post.images.length > 0) {
-      const deleteParams = {
-        Bucket: process.env.AWS_S3_BUCKET,
-        Delete: {
-          Objects: post.images.map((img) => ({ Key: img.key })),
-        },
+      for (const image of post.images) {
+        try {
+          await cloudinary.uploader.destroy(image.publicId)
+        } catch (deleteError) {
+          console.error("Error deleting image from Cloudinary:", deleteError)
+        }
       }
-
-      await s3.deleteObjects(deleteParams).promise()
     }
 
     await Post.findByIdAndDelete(req.params.id)

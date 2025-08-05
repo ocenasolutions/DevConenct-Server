@@ -15,7 +15,7 @@ const postSchema = new mongoose.Schema(
     images: [
       {
         url: String,
-        key: String, // S3 key for deletion
+        publicId: String, // Cloudinary public_id for deletion
       },
     ],
     likes: [
@@ -114,6 +114,7 @@ postSchema.virtual("shareCount").get(function () {
 postSchema.index({ author: 1, createdAt: -1 })
 postSchema.index({ visibility: 1, createdAt: -1 })
 postSchema.index({ isActive: 1, createdAt: -1 })
+postSchema.index({ createdAt: -1 }) // For feed sorting
 
 // Ensure virtual fields are serialized
 postSchema.set("toJSON", { virtuals: true })
