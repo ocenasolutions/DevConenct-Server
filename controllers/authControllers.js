@@ -7,7 +7,7 @@ const { OAuth2Client } = require("google-auth-library")
 const googleClient = new OAuth2Client(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI || "http://localhost:3000/auth/google/callback",
+  process.env.GOOGLE_REDIRECT_URI || "https://melodic-sawine-ac9059.netlify.app/0/auth/google/callback",
 )
 
 // Generate JWT token
