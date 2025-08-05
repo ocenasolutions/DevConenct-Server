@@ -28,7 +28,7 @@ const server = http.createServer(app)
 // Socket.IO setup
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CLIENT_URL || "https://melodic-sawine-ac9059.netlify.app",
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
     methods: ["GET", "POST"],
     credentials: true,
   },

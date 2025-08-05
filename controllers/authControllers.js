@@ -4,7 +4,11 @@ const bcrypt = require("bcryptjs")
 const { OAuth2Client } = require("google-auth-library")
 
 // Initialize Google OAuth client
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID)
+const googleClient = new OAuth2Client(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI || "http://localhost:3000/auth/google/callback",
+)
 
 // Generate JWT token
 const generateToken = (userId) => {
@@ -273,6 +277,8 @@ const googleCallback = async (req, res) => {
   try {
     const { code, role = "developer", isLogin = true } = req.body
 
+    console.log("Google callback received:", { code: code ? "present" : "missing", role, isLogin })
+
     if (!code) {
       return res.status(400).json({
         success: false,
@@ -280,18 +286,36 @@ const googleCallback = async (req, res) => {
       })
     }
 
+    // Verify environment variables
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+      console.error("Missing Google OAuth credentials")
+      return res.status(500).json({
+        success: false,
+        message: "Server configuration error",
+      })
+    }
+
+    // Set up OAuth2 client with credentials
+    const oauth2Client = new OAuth2Client(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI || `${process.env.CLIENT_URL}/auth/google/callback`,
+    )
+
     // Exchange authorization code for tokens
-    const { tokens } = await googleClient.getToken(code)
-    googleClient.setCredentials(tokens)
+    const { tokens } = await oauth2Client.getToken(code)
+    oauth2Client.setCredentials(tokens)
 
     // Get user info from Google
-    const ticket = await googleClient.verifyIdToken({
+    const ticket = await oauth2Client.verifyIdToken({
       idToken: tokens.id_token,
       audience: process.env.GOOGLE_CLIENT_ID,
     })
 
     const payload = ticket.getPayload()
     const { sub, email, name, picture } = payload
+
+    console.log("Google user info:", { sub, email, name, picture: picture ? "present" : "missing" })
 
     if (!email || !name) {
       return res.status(400).json({
@@ -312,6 +336,7 @@ const googleCallback = async (req, res) => {
         user.avatar = picture
       }
       await user.save()
+      console.log("Updated existing user:", user.email)
     } else {
       // Create new user
       user = await User.create({
@@ -324,6 +349,7 @@ const googleCallback = async (req, res) => {
         isVerified: true,
         lastLogin: new Date(),
       })
+      console.log("Created new user:", user.email)
     }
 
     // Generate JWT token
