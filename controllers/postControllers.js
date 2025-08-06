@@ -1,3 +1,4 @@
+const mongoose = require("mongoose") 
 const Post = require("../models/Post")
 const User = require("../models/User")
 const Connection = require("../models/Connection")
@@ -91,6 +92,14 @@ const createPost = async (req, res) => {
 // @access  Private
 const getPost = async (req, res) => {
   try {
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID format",
+      })
+    }
+
     const post = await Post.findById(req.params.id)
       .populate("author", "name avatar role")
       .populate("likes.user", "name avatar")
@@ -276,70 +285,144 @@ const getMyPosts = async (req, res) => {
 // @access  Private
 const toggleLike = async (req, res) => {
   try {
-    const post = await Post.findById(req.params.id)
+    const postId = req.params.id
 
-    if (!post) {
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID format",
+      })
+    }
+
+    const post = await Post.findById(postId)
+
+    if (!post || !post.isActive) {
       return res.status(404).json({
         success: false,
         message: "Post not found",
       })
     }
 
-    const existingLike = post.likes.find((like) => like.user.toString() === req.user.userId.toString())
+    // Check if user has permission to interact with this post
+    const userId = req.user.userId
+    if (post.visibility === "private" && post.author.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to interact with this post",
+      })
+    }
 
-    if (existingLike) {
-      // Unlike
-      post.likes = post.likes.filter((like) => like.user.toString() !== req.user.userId.toString())
+    if (post.visibility === "friends" && post.author.toString() !== userId.toString()) {
+      // Check if users are connected
+      const connection = await Connection.findOne({
+        $or: [
+          { requester: userId, recipient: post.author, status: "accepted" },
+          { requester: post.author, recipient: userId, status: "accepted" },
+        ],
+      })
+
+      if (!connection) {
+        return res.status(403).json({
+          success: false,
+          message: "Not authorized to interact with this post",
+        })
+      }
+    }
+
+    const existingLikeIndex = post.likes.findIndex(
+      (like) => like.user.toString() === userId.toString()
+    )
+
+    let isLiked = false
+
+    if (existingLikeIndex !== -1) {
+      // Unlike - remove the like
+      post.likes.splice(existingLikeIndex, 1)
+      isLiked = false
     } else {
-      // Like
-      post.likes.push({ user: req.user.userId })
+      // Like - add the like
+      post.likes.push({ 
+        user: userId,
+        createdAt: new Date()
+      })
+      isLiked = true
 
       // Create notification for post author (if not self-like)
-      if (post.author.toString() !== req.user.userId.toString()) {
-        await createNotification(
-          post.author,
-          "like",
-          "New Like",
-          `${req.user.name} liked your post`,
-          {
-            postId: post._id,
-            userId: req.user.userId,
-          },
-          req,
-        )
+      if (post.author.toString() !== userId.toString()) {
+        try {
+          await createNotification(
+            post.author,
+            "like",
+            "New Like",
+            `${req.user.name} liked your post`,
+            {
+              postId: post._id,
+              userId: userId,
+            },
+            req
+          )
+        } catch (notificationError) {
+          console.error("Failed to create like notification:", notificationError)
+          // Don't fail the entire request if notification fails
+        }
       }
     }
 
     await post.save()
+
+    // Populate likes for response
     await post.populate("likes.user", "name avatar")
 
-    // Emit real-time update to post author
-    if (!existingLike && post.author.toString() !== req.user.userId.toString()) {
-      const io = req.app.get("io")
-      if (io) {
-        emitToUser(io, post.author, "post_liked", {
-          postId: post._id,
-          likedBy: {
-            _id: req.user.userId,
-            name: req.user.name,
-            avatar: req.user.avatar,
-          },
-          likeCount: post.likes.length,
-        })
+    // Emit real-time update to post author (only for new likes, not unlikes)
+    if (isLiked && post.author.toString() !== userId.toString()) {
+      try {
+        const io = req.app.get("io")
+        if (io) {
+          emitToUser(io, post.author, "post_liked", {
+            postId: post._id,
+            likedBy: {
+              _id: userId,
+              name: req.user.name,
+              avatar: req.user.avatar,
+            },
+            likeCount: post.likes.length,
+          })
+        }
+      } catch (socketError) {
+        console.error("Failed to emit socket event:", socketError)
+        // Don't fail the entire request if socket emission fails
       }
     }
 
     res.json({
       success: true,
-      liked: !existingLike,
+      liked: isLiked,
       likeCount: post.likes.length,
       likes: post.likes,
     })
   } catch (error) {
     console.error("Toggle like error:", error)
+    
+    // More specific error handling
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID",
+      })
+    }
+    
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        message: "Validation error",
+      })
+    }
+
     res.status(500).json({
       success: false,
       message: "Server error",
+      ...(process.env.NODE_ENV === 'development' && { error: error.message })
     })
   }
 }
@@ -350,7 +433,9 @@ const toggleLike = async (req, res) => {
 const addComment = async (req, res) => {
   try {
     const { content } = req.body
+    const postId = req.params.id
 
+    // Validate input
     if (!content || content.trim().length === 0) {
       return res.status(400).json({
         success: false,
@@ -358,52 +443,103 @@ const addComment = async (req, res) => {
       })
     }
 
-    const post = await Post.findById(req.params.id)
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID format",
+      })
+    }
 
-    if (!post) {
+    // Validate user data
+    if (!req.user || !req.user.userId) {
+      return res.status(401).json({
+        success: false,
+        message: "User authentication required",
+      })
+    }
+
+    const post = await Post.findById(postId)
+
+    if (!post || !post.isActive) {
       return res.status(404).json({
         success: false,
         message: "Post not found",
       })
     }
 
+    // Check if user has permission to comment on this post
+    const userId = req.user.userId
+    
+    if (post.visibility === "private" && post.author.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "Not authorized to comment on this post",
+      })
+    }
+
+    if (post.visibility === "friends" && post.author.toString() !== userId.toString()) {
+      // Check if users are connected
+      const connection = await Connection.findOne({
+        $or: [
+          { requester: userId, recipient: post.author, status: "accepted" },
+          { requester: post.author, recipient: userId, status: "accepted" },
+        ],
+      })
+
+      if (!connection) {
+        return res.status(403).json({
+          success: false,
+          message: "Not authorized to comment on this post",
+        })
+      }
+    }
+
     const comment = {
-      user: req.user.userId,
+      user: userId,
       content: content.trim(),
+      createdAt: new Date(),
     }
 
     post.comments.push(comment)
     await post.save()
+    
+    // Populate the new comment with user data
     await post.populate("comments.user", "name avatar")
 
     const newComment = post.comments[post.comments.length - 1]
 
     // Create notification for post author (if not self-comment)
-    if (post.author.toString() !== req.user.userId.toString()) {
-      await createNotification(
-        post.author,
-        "comment",
-        "New Comment",
-        `${req.user.name} commented on your post`,
-        {
-          postId: post._id,
-          userId: req.user.userId,
-        },
-        req,
-      )
+    if (post.author.toString() !== userId.toString()) {
+      try {
+        await createNotification(
+          post.author,
+          "comment",
+          "New Comment",
+          `${req.user.name} commented on your post`,
+          {
+            postId: post._id,
+            userId: userId,
+          },
+          req,
+        )
 
-      // Emit real-time update to post author
-      const io = req.app.get("io")
-      if (io) {
-        emitToUser(io, post.author, "post_commented", {
-          postId: post._id,
-          comment: newComment,
-          commentCount: post.comments.length,
-        })
+        // Emit real-time update to post author
+        const io = req.app.get("io")
+        if (io) {
+          emitToUser(io, post.author, "post_commented", {
+            postId: post._id,
+            comment: newComment,
+            commentCount: post.comments.length,
+          })
+        }
+      } catch (notificationError) {
+        console.error("Failed to create comment notification or emit socket event:", notificationError)
+        // Don't fail the entire request if notification/socket fails
       }
     }
 
-    res.json({
+    res.status(201).json({
       success: true,
       message: "Comment added successfully",
       comment: newComment,
@@ -411,9 +547,33 @@ const addComment = async (req, res) => {
     })
   } catch (error) {
     console.error("Add comment error:", error)
+    
+    // More specific error handling
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID",
+      })
+    }
+    
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        message: "Validation error: " + error.message,
+      })
+    }
+
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: "Duplicate entry error",
+      })
+    }
+
     res.status(500).json({
       success: false,
       message: "Server error",
+      ...(process.env.NODE_ENV === 'development' && { error: error.message })
     })
   }
 }
@@ -424,9 +584,19 @@ const addComment = async (req, res) => {
 const sharePost = async (req, res) => {
   try {
     const { message = "" } = req.body
-    const post = await Post.findById(req.params.id).populate("author", "name avatar")
+    const postId = req.params.id
 
-    if (!post) {
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID format",
+      })
+    }
+
+    const post = await Post.findById(postId).populate("author", "name avatar")
+
+    if (!post || !post.isActive) {
       return res.status(404).json({
         success: false,
         message: "Post not found",
@@ -474,61 +644,71 @@ const sharePost = async (req, res) => {
 
     // Create notification for original post author (if not self-share)
     if (post.author._id.toString() !== req.user.userId.toString()) {
-      await createNotification(
-        post.author._id,
-        "share",
-        "Post Shared",
-        `${req.user.name} shared your post`,
-        {
-          postId: post._id,
-          sharedPostId: sharedPost._id,
-          userId: req.user.userId,
-        },
-        req,
-      )
-
-      // Emit real-time update to post author
-      const io = req.app.get("io")
-      if (io) {
-        emitToUser(io, post.author._id, "post_shared", {
-          postId: post._id,
-          sharedPostId: sharedPost._id,
-          sharedBy: {
-            _id: req.user.userId,
-            name: req.user.name,
-            avatar: req.user.avatar,
+      try {
+        await createNotification(
+          post.author._id,
+          "share",
+          "Post Shared",
+          `${req.user.name} shared your post`,
+          {
+            postId: post._id,
+            sharedPostId: sharedPost._id,
+            userId: req.user.userId,
           },
-          shareCount: post.shares.length,
-          message: message.trim(),
-        })
+          req,
+        )
+
+        // Emit real-time update to post author
+        const io = req.app.get("io")
+        if (io) {
+          emitToUser(io, post.author._id, "post_shared", {
+            postId: post._id,
+            sharedPostId: sharedPost._id,
+            sharedBy: {
+              _id: req.user.userId,
+              name: req.user.name,
+              avatar: req.user.avatar,
+            },
+            shareCount: post.shares.length,
+            message: message.trim(),
+          })
+        }
+      } catch (notificationError) {
+        console.error("Failed to create share notification or emit socket event:", notificationError)
+        // Don't fail the entire request if notification/socket fails
       }
     }
 
     // Notify user's connections about the shared post
-    const connections = await Connection.find({
-      $or: [
-        { requester: req.user.userId, status: "accepted" },
-        { recipient: req.user.userId, status: "accepted" },
-      ],
-    })
-
-    const connectedUserIds = connections.map((conn) =>
-      conn.requester.toString() === req.user.userId.toString() ? conn.recipient : conn.requester,
-    )
-
-    // Emit to connected users about new shared post
-    const io = req.app.get("io")
-    if (io) {
-      connectedUserIds.forEach((userId) => {
-        emitToUser(io, userId, "new_shared_post", {
-          post: sharedPost,
-          sharedBy: {
-            _id: req.user.userId,
-            name: req.user.name,
-            avatar: req.user.avatar,
-          },
-        })
+    try {
+      const connections = await Connection.find({
+        $or: [
+          { requester: req.user.userId, status: "accepted" },
+          { recipient: req.user.userId, status: "accepted" },
+        ],
       })
+
+      const connectedUserIds = connections.map((conn) =>
+        conn.requester.toString() === req.user.userId.toString() ? conn.recipient : conn.requester,
+      )
+
+      // Emit to connected users about new shared post
+      const io = req.app.get("io")
+      if (io) {
+        connectedUserIds.forEach((userId) => {
+          emitToUser(io, userId, "new_shared_post", {
+            post: sharedPost,
+            sharedBy: {
+              _id: req.user.userId,
+              name: req.user.name,
+              avatar: req.user.avatar,
+            },
+          })
+        })
+      }
+    } catch (connectionError) {
+      console.error("Failed to notify connections about shared post:", connectionError)
+      // Don't fail the entire request if connection notification fails
     }
 
     res.json({
@@ -539,9 +719,18 @@ const sharePost = async (req, res) => {
     })
   } catch (error) {
     console.error("Share post error:", error)
+    
+    if (error.name === 'CastError') {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID",
+      })
+    }
+
     res.status(500).json({
       success: false,
       message: "Server error",
+      ...(process.env.NODE_ENV === 'development' && { error: error.message })
     })
   }
 }
@@ -551,9 +740,19 @@ const sharePost = async (req, res) => {
 // @access  Private
 const getPostShares = async (req, res) => {
   try {
-    const post = await Post.findById(req.params.id).populate("shares.user", "name avatar role")
+    const postId = req.params.id
 
-    if (!post) {
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID format",
+      })
+    }
+
+    const post = await Post.findById(postId).populate("shares.user", "name avatar role")
+
+    if (!post || !post.isActive) {
       return res.status(404).json({
         success: false,
         message: "Post not found",
@@ -579,7 +778,17 @@ const getPostShares = async (req, res) => {
 // @access  Private
 const deletePost = async (req, res) => {
   try {
-    const post = await Post.findById(req.params.id)
+    const postId = req.params.id
+
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid post ID format",
+      })
+    }
+
+    const post = await Post.findById(postId)
 
     if (!post) {
       return res.status(404).json({
@@ -607,7 +816,7 @@ const deletePost = async (req, res) => {
       }
     }
 
-    await Post.findByIdAndDelete(req.params.id)
+    await Post.findByIdAndDelete(postId)
 
     res.json({
       success: true,
@@ -628,6 +837,15 @@ const deletePost = async (req, res) => {
 const deleteComment = async (req, res) => {
   try {
     const { postId, commentId } = req.params
+
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId) || !mongoose.Types.ObjectId.isValid(commentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ID format",
+      })
+    }
+
     const post = await Post.findById(postId)
 
     if (!post) {
@@ -685,6 +903,14 @@ const editComment = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Comment content is required",
+      })
+    }
+
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(postId) || !mongoose.Types.ObjectId.isValid(commentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid ID format",
       })
     }
 
