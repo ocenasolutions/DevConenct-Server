@@ -54,7 +54,7 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")))
 
 // Database connection
 mongoose
-  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/devconnect", {
+  .connect(process.env.MONGODB_URI , {
     useNewUrlParser: true,
     useUnifiedTopology: true,
   })
