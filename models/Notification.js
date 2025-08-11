@@ -20,20 +20,36 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    data: {
-      bookingId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "Booking",
-      },
-      developerId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
-      },
-      recruiterId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: "User",
-      },
-    },
+data: {
+  bookingId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Booking",
+  },
+  developerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+  },
+  recruiterId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+  },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+  },
+  postId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Post", 
+  },
+  connectionId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Connection", 
+  },
+  messageId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Message", 
+  },
+},
     isRead: {
       type: Boolean,
       default: false,

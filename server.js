@@ -5,6 +5,7 @@ const dotenv = require("dotenv")
 const http = require("http")
 const socketIo = require("socket.io")
 const path = require("path")
+const jwt = require("jsonwebtoken")
 
 // Load environment variables
 dotenv.config()
@@ -19,88 +20,216 @@ const postRoutes = require("./routes/postRoutes")
 const connectionRoutes = require("./routes/connectionRoutes")
 const chatRoutes = require("./routes/chatRoutes")
 
-// Import middleware
-const authMiddleware = require("./middleware/authMiddleware")
+// Import models
+const User = require("./models/User")
+const Message = require("./models/Message")
+
+// Import utilities
+const { emitToUser, joinRoom, leaveRoom } = require("./utils/socketUtils")
 
 const app = express()
 const server = http.createServer(app)
 
-// Socket.IO setup
-const io = socketIo(server, {
-  cors: {
-    origin: process.env.CLIENT_URL || "https://melodic-sawine-ac9059.netlify.app",
-    methods: ["GET", "POST"],
-    credentials: true,
-  },
-})
+// CORS configuration
+const corsOptions = {
+  origin: process.env.CLIENT_URL || "https://dev-connect1.netlify.app",
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"]
+};
 
-app.set("io", io)
+app.use(cors(corsOptions));
+
+// Socket.IO configuration
+const io = socketIo(server, {
+  cors: corsOptions,
+  transports: ['websocket', 'polling']
+});
+
+// Make io available to routes
+app.set('io', io);
 
 // Middleware
 app.use(express.json({ limit: "10mb" }))
 app.use(express.urlencoded({ extended: true, limit: "10mb" }))
 
-app.use(
-  cors({
-    origin: process.env.CLIENT_URL || "https://melodic-sawine-ac9059.netlify.app",
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-)
+// Connect to MongoDB
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/joindev', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => {
+  console.log('Connected to MongoDB');
+})
+.catch((error) => {
+  console.error('MongoDB connection error:', error);
+  process.exit(1);
+});
 
-// Serve static files
-app.use("/uploads", express.static(path.join(__dirname, "uploads")))
+// Store online users
+const onlineUsers = new Map();
 
-// Database connection
-mongoose
-  .connect(process.env.MONGODB_URI , {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => {
-    console.log("Connected to MongoDB")
-  })
-  .catch((error) => {
-    console.error("MongoDB connection error:", error)
-    process.exit(1)
-  })
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  console.log(`User ${socket.user.name} connected with socket ID: ${socket.id}`);
+  
+  // Add user to online users
+  onlineUsers.set(socket.userId, {
+    socketId: socket.id,
+    user: socket.user,
+    lastSeen: new Date()
+  });
 
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id)
+  // Join user's personal room
+  socket.join(`user_${socket.userId}`);
 
-  socket.on("join", (userId) => {
-    socket.join(userId)
-    console.log(`User ${userId} joined room`)
-  })
+  // Emit online users to all clients
+  io.emit('online_users', { users: Array.from(onlineUsers.keys()) });
 
-  socket.on("send_message", async (data) => {
-    try {
-      const { receiverId, content, senderId } = data
+  // Notify others that user is online
+  socket.broadcast.emit('user_online', { userId: socket.userId });
 
-      // Emit to receiver
-      socket.to(receiverId).emit("receive_message", {
-        senderId,
-        content,
-        timestamp: new Date(),
-      })
-    } catch (error) {
-      console.error("Socket message error:", error)
-    }
-  })
+  // Handle joining user room
+  socket.on('join_user_room', (userId) => {
+    socket.join(`user_${userId}`);
+    console.log(`User ${socket.user.name} joined room: user_${userId}`);
+  });
+
+  // Handle sending messages
+  socket.on('send_message', (data) => {
+    const { receiverId, message } = data;
+    
+    // Emit to receiver
+    io.to(`user_${receiverId}`).emit('receive_message', message);
+    
+    // Emit delivery confirmation to sender
+    socket.emit('message_delivered', { messageId: message._id });
+    
+    console.log(`Message sent from ${socket.userId} to ${receiverId}`);
+  });
 
   // Handle typing indicators
-  socket.on("typing", (data) => {
-    socket.to(data.receiverId).emit("user_typing", {
-      senderId: data.senderId,
-      isTyping: data.isTyping,
-    })
-  })
+  socket.on('typing', (data) => {
+    const { receiverId } = data;
+    io.to(`user_${receiverId}`).emit('user_typing', {
+      userId: socket.userId,
+      userName: socket.user.name
+    });
+  });
 
-  socket.on("disconnect", () => {
-    console.log("User disconnected:", socket.id)
-  })
-})
+  socket.on('stop_typing', (data) => {
+    const { receiverId } = data;
+    io.to(`user_${receiverId}`).emit('user_stopped_typing', {
+      userId: socket.userId
+    });
+  });
+
+  // Handle message read receipts
+  socket.on('mark_messages_read', (data) => {
+    const { senderId, readBy } = data;
+    io.to(`user_${senderId}`).emit('messages_read', {
+      readBy,
+      timestamp: new Date()
+    });
+  });
+
+  // Handle booking notifications
+  socket.on('booking_notification', (data) => {
+    const { userId, message, type, bookingId } = data;
+    io.to(`user_${userId}`).emit('booking_notification', {
+      message,
+      type,
+      bookingId,
+      timestamp: new Date()
+    });
+  });
+
+  // Handle connection request notifications
+  socket.on('connection_request', (data) => {
+    const { receiverId, senderName, senderId } = data;
+    io.to(`user_${receiverId}`).emit('friend_request_notification', {
+      message: `${senderName} sent you a connection request`,
+      senderId,
+      timestamp: new Date()
+    });
+  });
+
+  // Handle post interactions
+  socket.on('post_interaction', (data) => {
+    const { userId, message, type, postId } = data;
+    io.to(`user_${userId}`).emit('interaction_notification', {
+      message,
+      type,
+      postId,
+      timestamp: new Date()
+    });
+  });
+
+  // Handle video call events
+  socket.on('call_user', (data) => {
+    const { receiverId, offer, callType } = data;
+    io.to(`user_${receiverId}`).emit('incoming_call', {
+      callerId: socket.userId,
+      callerName: socket.user.name,
+      offer,
+      callType
+    });
+  });
+
+  socket.on('answer_call', (data) => {
+    const { callerId, answer } = data;
+    io.to(`user_${callerId}`).emit('call_answered', {
+      answer,
+      answeredBy: socket.userId
+    });
+  });
+
+  socket.on('reject_call', (data) => {
+    const { callerId } = data;
+    io.to(`user_${callerId}`).emit('call_rejected', {
+      rejectedBy: socket.userId
+    });
+  });
+
+  socket.on('end_call', (data) => {
+    const { receiverId } = data;
+    io.to(`user_${receiverId}`).emit('call_ended', {
+      endedBy: socket.userId
+    });
+  });
+
+  // Handle ICE candidates for WebRTC
+  socket.on('ice_candidate', (data) => {
+    const { receiverId, candidate } = data;
+    io.to(`user_${receiverId}`).emit('ice_candidate', {
+      candidate,
+      from: socket.userId
+    });
+  });
+
+  // Handle disconnect
+  socket.on('disconnect', (reason) => {
+    console.log(`User ${socket.user.name} disconnected: ${reason}`);
+    
+    // Remove user from online users
+    onlineUsers.delete(socket.userId);
+    
+    // Update user's last seen
+    User.findByIdAndUpdate(socket.userId, { lastSeen: new Date() })
+      .catch(error => console.error('Error updating last seen:', error));
+    
+    // Emit updated online users list
+    io.emit('online_users', { users: Array.from(onlineUsers.keys()) });
+    
+    // Notify others that user is offline
+    socket.broadcast.emit('user_offline', { userId: socket.userId });
+  });
+
+  // Handle errors
+  socket.on('error', (error) => {
+    console.error(`Socket error for user ${socket.user.name}:`, error);
+  });
+});
 
 // Routes
 app.use("/api/auth", authRoutes)
@@ -112,22 +241,58 @@ app.use("/api/posts", postRoutes)
 app.use("/api/connections", connectionRoutes)
 app.use("/api/messages", chatRoutes)
 
-// Health check endpoint
+// Enhanced health check endpoint
 app.get("/api/health", (req, res) => {
+  const uptime = process.uptime()
+  const memoryUsage = process.memoryUsage()
+  
   res.json({
     success: true,
     message: "Server is running",
     timestamp: new Date().toISOString(),
+    uptime: `${Math.floor(uptime / 60)} minutes`,
+    connectedUsers: onlineUsers.size,
+    memoryUsage: {
+      rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
+      heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`,
+      heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
+    },
+    environment: process.env.NODE_ENV || "development",
   })
 })
 
-// Error handling middleware
+// Get online users endpoint with enhanced info
+app.get("/api/online-users", (req, res) => {
+  const onlineUsersArray = Array.from(onlineUsers.values())
+    .map(user => ({
+      userId: user.user._id,
+      name: user.user.name,
+      avatar: user.user.avatar,
+      role: user.user.role,
+      lastSeen: user.lastSeen,
+      connectedAt: user.connectedAt,
+    }))
+
+  res.json({
+    success: true,
+    onlineUsers: onlineUsersArray,
+    count: onlineUsersArray.length,
+    timestamp: new Date().toISOString(),
+  })
+})
+
+// Enhanced error handling middleware
 app.use((err, req, res, next) => {
-  console.error("Error:", err.stack)
-  res.status(500).json({
+  console.error("❌ Server Error:", err.stack)
+  
+  // Don't leak error details in production
+  const isDevelopment = process.env.NODE_ENV === "development"
+  
+  res.status(err.status || 500).json({
     success: false,
-    message: "Something went wrong!",
-    error: process.env.NODE_ENV === "development" ? err.message : "Internal server error",
+    message: err.message || "Something went wrong!",
+    error: isDevelopment ? err.message : "Internal server error",
+    timestamp: new Date().toISOString(),
   })
 })
 
@@ -135,30 +300,57 @@ app.use((err, req, res, next) => {
 app.use("*", (req, res) => {
   res.status(404).json({
     success: false,
-    message: "Route not found",
+    message: `Route ${req.originalUrl} not found`,
+    timestamp: new Date().toISOString(),
   })
 })
 
 const PORT = process.env.PORT || 5000
 
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-  console.log(`Environment: ${process.env.NODE_ENV || "development"}`)
+  console.log(`🚀 Server running on port ${PORT}`)
+  console.log(`🌍 Environment: ${process.env.NODE_ENV || "development"}`)
+  console.log(`🔗 Client URL: ${process.env.CLIENT_URL || "https://dev-connect1.netlify.app/"}`)
+  console.log(`📊 Health check: http://localhost:${PORT}/api/health`)
 })
 
 // Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down gracefully")
+const gracefulShutdown = (signal) => {
+  console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`)
+  
   server.close(() => {
-    console.log("Process terminated")
-    mongoose.connection.close()
+    console.log("✅ HTTP server closed")
+    
+    mongoose.connection.close(false, () => {
+      console.log("✅ MongoDB connection closed")
+      process.exit(0)
+    })
+  })
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error("❌ Could not close connections in time, forcefully shutting down")
+    process.exit(1)
+  }, 10000)
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"))
+process.on("SIGINT", () => gracefulShutdown("SIGINT"))
+
+process.on("unhandledRejection", (err, promise) => {
+  console.error("❌ Unhandled Promise Rejection:", err.message)
+  console.error("Promise:", promise)
+  
+  server.close(() => {
+    process.exit(1)
   })
 })
 
-process.on("SIGINT", () => {
-  console.log("SIGINT received, shutting down gracefully")
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err.message)
+  console.error("Stack:", err.stack)
+  
   server.close(() => {
-    console.log("Process terminated")
-    mongoose.connection.close()
+    process.exit(1)
   })
 })

@@ -337,6 +337,8 @@ const getConnections = async (req, res) => {
     const { page = 1, limit = 20, status = "accepted" } = req.query
     const userId = req.user.userId
 
+    console.log("Getting connections for user:", userId)
+
     const connections = await Connection.find({
       $or: [
         { requester: userId, status },
@@ -348,6 +350,8 @@ const getConnections = async (req, res) => {
       .sort({ connectionDate: -1, createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
+
+    console.log("Found connections:", connections.length)
 
     // Format connections to show the other user
     const formattedConnections = connections.map((conn) => {
@@ -389,12 +393,14 @@ const getConnections = async (req, res) => {
   }
 }
 
-// @desc    Get user's friends (accepted connections)
+// @desc    Get user's friends (accepted connections) - FIXED
 // @route   GET /api/connections/friends
 // @access  Private
 const getFriends = async (req, res) => {
   try {
     const userId = req.user.userId
+
+    console.log("Getting friends for user:", userId)
 
     const connections = await Connection.find({
       $or: [
@@ -406,12 +412,15 @@ const getFriends = async (req, res) => {
       .populate("recipient", "name avatar role profile.location profile.bio profile.skills")
       .sort({ connectionDate: -1 })
 
-    // Format connections to show the other user
+    console.log("Found friend connections:", connections.length)
+
+    // Format connections to show the other user with consistent structure
     const friends = connections.map((conn) => {
       const otherUser = conn.requester._id.toString() === userId.toString() ? conn.recipient : conn.requester
 
       return {
         _id: otherUser._id,
+        id: otherUser._id, // Add both for compatibility
         connectionId: conn._id,
         name: otherUser.name,
         avatar: otherUser.avatar,
@@ -422,9 +431,12 @@ const getFriends = async (req, res) => {
       }
     })
 
+    console.log("Formatted friends:", friends.length)
+
     res.json({
       success: true,
       friends,
+      count: friends.length,
     })
   } catch (error) {
     console.error("Get friends error:", error)
@@ -525,13 +537,15 @@ const getConnectionRequests = async (req, res) => {
   }
 }
 
-// @desc    Get connection suggestions
+// @desc    Get connection suggestions - IMPROVED
 // @route   GET /api/connections/suggestions
 // @access  Private
 const getConnectionSuggestions = async (req, res) => {
   try {
     const userId = req.user.userId
     const { limit = 10 } = req.query
+
+    console.log("Getting suggestions for user:", userId)
 
     // Get user's existing connections
     const existingConnections = await Connection.find({
@@ -544,6 +558,8 @@ const getConnectionSuggestions = async (req, res) => {
 
     // Add current user to exclude list
     connectedUserIds.push(userId.toString())
+
+    console.log("Excluding users:", connectedUserIds)
 
     // Get current user's profile for matching
     const currentUser = await User.findById(userId)
@@ -561,12 +577,98 @@ const getConnectionSuggestions = async (req, res) => {
       .limit(Number.parseInt(limit))
       .sort({ createdAt: -1 })
 
+    console.log("Found suggestions:", suggestions.length)
+
     res.json({
       success: true,
       suggestions,
+      count: suggestions.length,
     })
   } catch (error) {
     console.error("Get connection suggestions error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Search users for connections - NEW
+// @route   GET /api/connections/search
+// @access  Private
+const searchUsers = async (req, res) => {
+  try {
+    const userId = req.user.userId
+    const { query, limit = 20, page = 1 } = req.query
+
+    if (!query || query.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        message: "Search query must be at least 2 characters long",
+      })
+    }
+
+    console.log("Searching users with query:", query)
+
+    // Get user's existing connections to exclude them
+    const existingConnections = await Connection.find({
+      $or: [{ requester: userId }, { recipient: userId }],
+    })
+
+    const connectedUserIds = existingConnections.map((conn) =>
+      conn.requester.toString() === userId.toString() ? conn.recipient.toString() : conn.requester.toString(),
+    )
+
+    // Add current user to exclude list
+    connectedUserIds.push(userId.toString())
+
+    // Build search criteria
+    const searchCriteria = {
+      _id: { $nin: connectedUserIds },
+      isActive: true,
+      $or: [
+        { name: { $regex: query, $options: "i" } },
+        { "profile.bio": { $regex: query, $options: "i" } },
+        { "profile.skills": { $regex: query, $options: "i" } },
+        { "profile.location": { $regex: query, $options: "i" } },
+        { role: { $regex: query, $options: "i" } },
+      ],
+    }
+
+    const users = await User.find(searchCriteria)
+      .select("name avatar role profile.location profile.bio profile.skills")
+      .limit(Number.parseInt(limit))
+      .skip((page - 1) * limit)
+      .sort({ name: 1 })
+
+    const total = await User.countDocuments(searchCriteria)
+
+    console.log("Found users:", users.length)
+
+    // Get connection status for each user
+    const usersWithStatus = await Promise.all(
+      users.map(async (user) => {
+        const connectionStatus = await Connection.getConnectionStatus(userId, user._id)
+        return {
+          ...user.toJSON(),
+          connectionStatus,
+        }
+      })
+    )
+
+    res.json({
+      success: true,
+      users: usersWithStatus,
+      pagination: {
+        currentPage: Number.parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalUsers: total,
+        hasNext: page < Math.ceil(total / limit),
+        hasPrev: page > 1,
+      },
+    })
+  } catch (error) {
+    console.error("Search users error:", error)
     res.status(500).json({
       success: false,
       message: "Server error: " + error.message,
@@ -678,6 +780,7 @@ module.exports = {
   getSentRequests,
   getConnectionRequests,
   getConnectionSuggestions,
+  searchUsers, // NEW - Add this to exports
   removeConnection,
   getConnectionStatus,
 }

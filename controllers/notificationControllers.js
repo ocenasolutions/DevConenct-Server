@@ -13,13 +13,19 @@ const createNotification = async (userId, type, title, message, data = {}, req =
     })
 
     await notification.save()
+    
+    // Only populate paths that exist in the schema
     await notification.populate([
       { path: "data.bookingId", select: "scheduledDate scheduledTime sessionType" },
       { path: "data.developerId", select: "name avatar" },
       { path: "data.recruiterId", select: "name avatar" },
-      { path: "data.userId", select: "name avatar" },
-      { path: "data.postId", select: "content" },
     ])
+
+    // Get unread count
+    const unreadCount = await Notification.countDocuments({
+      userId,
+      isRead: false,
+    })
 
     // Emit real-time notification if request object is available
     if (req && req.app) {
@@ -27,10 +33,7 @@ const createNotification = async (userId, type, title, message, data = {}, req =
       if (io) {
         emitToUser(io, userId, "new_notification", {
           notification,
-          unreadCount: await Notification.countDocuments({
-            userId,
-            isRead: false,
-          }),
+          unreadCount,
         })
       }
     }
@@ -58,8 +61,6 @@ const getNotifications = async (req, res) => {
       .populate("data.bookingId", "scheduledDate scheduledTime sessionType")
       .populate("data.developerId", "name avatar")
       .populate("data.recruiterId", "name avatar")
-      .populate("data.userId", "name avatar")
-      .populate("data.postId", "content")
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(Number.parseInt(limit))
@@ -211,10 +212,77 @@ const deleteNotification = async (req, res) => {
   }
 }
 
+// @desc    Get unread count
+// @route   GET /api/notifications/unread-count
+// @access  Private
+const getUnreadCount = async (req, res) => {
+  try {
+    const unreadCount = await Notification.countDocuments({
+      userId: req.user.userId,
+      isRead: false,
+    })
+
+    res.json({
+      success: true,
+      unreadCount,
+    })
+  } catch (error) {
+    console.error("Get unread count error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
+// @desc    Get notifications by type
+// @route   GET /api/notifications/type/:type
+// @access  Private
+const getNotificationsByType = async (req, res) => {
+  try {
+    const { type } = req.params
+    const { page = 1, limit = 20 } = req.query
+
+    const notifications = await Notification.find({
+      userId: req.user.userId,
+      type,
+    })
+      .populate("data.bookingId", "scheduledDate scheduledTime sessionType")
+      .populate("data.developerId", "name avatar")
+      .populate("data.recruiterId", "name avatar")
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(Number.parseInt(limit))
+
+    const total = await Notification.countDocuments({
+      userId: req.user.userId,
+      type,
+    })
+
+    res.json({
+      success: true,
+      notifications,
+      pagination: {
+        current: Number.parseInt(page),
+        pages: Math.ceil(total / limit),
+        total,
+      },
+    })
+  } catch (error) {
+    console.error("Get notifications by type error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+}
+
 module.exports = {
   createNotification,
   getNotifications,
   markAsRead,
   markAllAsRead,
   deleteNotification,
+  getUnreadCount,
+  getNotificationsByType,
 }

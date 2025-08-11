@@ -5,11 +5,14 @@ const authMiddleware = require("../middleware/authMiddleware")
 
 // Public routes
 router.post("/register", authController.register)
+router.post("/verify-otp", authController.verifyOTP)
+router.post("/resend-otp", authController.resendOTP)
 router.post("/login", authController.login)
 router.post("/google", authController.googleAuth)
 router.post("/google/callback", authController.googleCallback)
+router.post("/github/callback", authController.githubCallback)
 router.post("/linkedin", authController.linkedinAuth)
-router.post("/linkedin/callback", authController.linkedinCallback) // Add this line
+router.post("/linkedin/callback", authController.linkedinCallback)
 
 // Protected routes
 router.get("/me", authMiddleware, authController.getCurrentUser)

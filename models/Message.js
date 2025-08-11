@@ -111,7 +111,6 @@ messageSchema.methods.markAsRead = function () {
   return this.save()
 }
 
-// Static method to get conversation between two users
 messageSchema.statics.getConversation = function (userId1, userId2, limit = 50) {
   return this.find({
     $or: [

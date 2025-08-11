@@ -1,6 +1,7 @@
 const Message = require("../models/Message")
 const User = require("../models/User")
 const Connection = require("../models/Connection")
+const mongoose = require("mongoose")
 
 // @desc    Send a message
 // @route   POST /api/messages/send
@@ -19,6 +20,14 @@ const sendMessage = async (req, res) => {
       })
     }
 
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(receiverId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid receiver ID",
+      })
+    }
+
     // Check if receiver exists
     const receiver = await User.findById(receiverId)
     if (!receiver) {
@@ -27,14 +36,6 @@ const sendMessage = async (req, res) => {
         message: "Receiver not found",
       })
     }
-
-    // Check if users are connected (optional - you might want to allow messaging without connection)
-    const connection = await Connection.findOne({
-      $or: [
-        { requester: senderId, recipient: receiverId, status: "accepted" },
-        { requester: receiverId, recipient: senderId, status: "accepted" },
-      ],
-    })
 
     // Create message
     const message = new Message({
@@ -56,10 +57,10 @@ const sendMessage = async (req, res) => {
       const io = req.app.get("io")
       if (io) {
         // Send to receiver
-        io.to(receiverId).emit("receive_message", populatedMessage)
+        io.to(receiverId.toString()).emit("receive_message", populatedMessage)
 
         // Send notification to receiver
-        io.to(receiverId).emit("message_notification", {
+        io.to(receiverId.toString()).emit("message_notification", {
           senderId,
           senderName: req.user.name,
           content: content.substring(0, 50) + (content.length > 50 ? "..." : ""),
@@ -95,6 +96,14 @@ const getMessages = async (req, res) => {
 
     console.log("Getting messages between:", { currentUserId, otherUserId })
 
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(otherUserId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid user ID",
+      })
+    }
+
     const messages = await Message.find({
       $or: [
         { sender: currentUserId, receiver: otherUserId },
@@ -129,7 +138,9 @@ const getMessages = async (req, res) => {
 
     res.json({
       success: true,
-      messages: messages.reverse(), // Reverse to show oldest first
+      data: {
+        messages: messages.reverse(), // Reverse to show oldest first
+      },
       pagination: {
         currentPage: Number.parseInt(page),
         totalPages: Math.ceil(total / limit),
@@ -154,11 +165,16 @@ const getConversations = async (req, res) => {
   try {
     const userId = req.user.userId
 
+    console.log("Getting conversations for user:", userId)
+
     // Get all messages where user is sender or receiver
-    const messages = await Message.aggregate([
+    const conversations = await Message.aggregate([
       {
         $match: {
-          $or: [{ sender: userId }, { receiver: userId }],
+          $or: [
+            { sender: new mongoose.Types.ObjectId(userId) }, 
+            { receiver: new mongoose.Types.ObjectId(userId) }
+          ],
         },
       },
       {
@@ -167,14 +183,21 @@ const getConversations = async (req, res) => {
       {
         $group: {
           _id: {
-            $cond: [{ $eq: ["$sender", userId] }, "$receiver", "$sender"],
+            $cond: [
+              { $eq: ["$sender", new mongoose.Types.ObjectId(userId)] }, 
+              "$receiver", 
+              "$sender"
+            ],
           },
           lastMessage: { $first: "$$ROOT" },
           unreadCount: {
             $sum: {
               $cond: [
                 {
-                  $and: [{ $eq: ["$receiver", userId] }, { $eq: ["$read", false] }],
+                  $and: [
+                    { $eq: ["$receiver", new mongoose.Types.ObjectId(userId)] }, 
+                    { $eq: ["$read", false] }
+                  ],
                 },
                 1,
                 0,
@@ -195,6 +218,28 @@ const getConversations = async (req, res) => {
         $unwind: "$user",
       },
       {
+        $lookup: {
+          from: "users",
+          localField: "lastMessage.sender",
+          foreignField: "_id",
+          as: "lastMessage.sender",
+        },
+      },
+      {
+        $lookup: {
+          from: "users",
+          localField: "lastMessage.receiver",
+          foreignField: "_id",
+          as: "lastMessage.receiver",
+        },
+      },
+      {
+        $unwind: "$lastMessage.sender",
+      },
+      {
+        $unwind: "$lastMessage.receiver",
+      },
+      {
         $project: {
           _id: 1,
           user: {
@@ -204,7 +249,25 @@ const getConversations = async (req, res) => {
             avatar: "$user.avatar",
             role: "$user.role",
           },
-          lastMessage: 1,
+          lastMessage: {
+            _id: "$lastMessage._id",
+            content: "$lastMessage.content",
+            messageType: "$lastMessage.messageType",
+            timestamp: "$lastMessage.createdAt",
+            createdAt: "$lastMessage.createdAt",
+            sender: {
+              _id: "$lastMessage.sender._id",
+              name: "$lastMessage.sender.name",
+              avatar: "$lastMessage.sender.avatar",
+              role: "$lastMessage.sender.role",
+            },
+            receiver: {
+              _id: "$lastMessage.receiver._id",
+              name: "$lastMessage.receiver.name",
+              avatar: "$lastMessage.receiver.avatar",
+              role: "$lastMessage.receiver.role",
+            },
+          },
           unreadCount: 1,
         },
       },
@@ -213,9 +276,13 @@ const getConversations = async (req, res) => {
       },
     ])
 
+    console.log("Found conversations:", conversations.length)
+
     res.json({
       success: true,
-      conversations: messages,
+      data: {
+        conversations: conversations,
+      },
     })
   } catch (error) {
     console.error("Get conversations error:", error)
@@ -234,7 +301,15 @@ const markMessagesAsRead = async (req, res) => {
     const { userId: senderId } = req.params
     const receiverId = req.user.userId
 
-    await Message.updateMany(
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(senderId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid sender ID",
+      })
+    }
+
+    const result = await Message.updateMany(
       {
         sender: senderId,
         receiver: receiverId,
@@ -246,11 +321,13 @@ const markMessagesAsRead = async (req, res) => {
       },
     )
 
+    console.log(`Marked ${result.modifiedCount} messages as read`)
+
     // Emit read receipt via Socket.IO
     try {
       const io = req.app.get("io")
       if (io) {
-        io.to(senderId).emit("messages_read", {
+        io.to(senderId.toString()).emit("messages_read", {
           readBy: receiverId,
           readAt: new Date(),
         })
@@ -262,6 +339,9 @@ const markMessagesAsRead = async (req, res) => {
     res.json({
       success: true,
       message: "Messages marked as read",
+      data: {
+        modifiedCount: result.modifiedCount,
+      },
     })
   } catch (error) {
     console.error("Mark messages as read error:", error)
@@ -279,6 +359,14 @@ const deleteMessage = async (req, res) => {
   try {
     const { messageId } = req.params
     const userId = req.user.userId
+
+    // Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid message ID",
+      })
+    }
 
     const message = await Message.findById(messageId)
 
@@ -337,12 +425,59 @@ const getUnreadCount = async (req, res) => {
       read: false,
     })
 
+    console.log(`Unread count for user ${userId}:`, unreadCount)
+
     res.json({
       success: true,
-      unreadCount,
+      data: {
+        unreadCount,
+      },
     })
   } catch (error) {
     console.error("Get unread count error:", error)
+    res.status(500).json({
+      success: false,
+      message: "Server error: " + error.message,
+    })
+  }
+}
+
+// @desc    Search users for conversations
+// @route   GET /api/messages/search/conversations
+// @access  Private
+const searchUsersForConversations = async (req, res) => {
+  try {
+    const { query } = req.query
+    const currentUserId = req.user.userId
+
+    if (!query || query.trim().length < 2) {
+      return res.json({
+        success: true,
+        data: {
+          users: [],
+        },
+      })
+    }
+
+    const users = await User.find({
+      _id: { $ne: currentUserId }, // Exclude current user
+      $or: [
+        { name: { $regex: query.trim(), $options: 'i' } },
+        { email: { $regex: query.trim(), $options: 'i' } },
+      ],
+      isActive: true,
+    })
+    .select("name email avatar role")
+    .limit(20)
+
+    res.json({
+      success: true,
+      data: {
+        users,
+      },
+    })
+  } catch (error) {
+    console.error("Search users error:", error)
     res.status(500).json({
       success: false,
       message: "Server error: " + error.message,
@@ -357,4 +492,5 @@ module.exports = {
   markMessagesAsRead,
   deleteMessage,
   getUnreadCount,
+  searchUsersForConversations,
 }
