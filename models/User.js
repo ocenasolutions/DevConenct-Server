@@ -204,10 +204,19 @@ const userSchema = new mongoose.Schema(
     },
     authProvider: {
       type: String,
-      enum: ["local", "google", "linkedin"],
+      enum: ["local", "google", "linkedin", "github"], // Added "github" to the enum
       default: "local",
     },
     providerId: String,
+    // OTP fields for email verification
+    otp: {
+      type: String,
+      select: false,
+    },
+    otpExpires: {
+      type: Date,
+      select: false,
+    },
     // Profile completion tracking
     profileCompletion: {
       type: Number,
@@ -290,6 +299,8 @@ userSchema.methods.comparePassword = async function (candidatePassword) {
 userSchema.methods.toJSON = function () {
   const user = this.toObject()
   delete user.password
+  delete user.otp
+  delete user.otpExpires
   return user
 }
 

@@ -43,10 +43,8 @@ router.get("/debug/user/:userId", async (req, res) => {
   }
 })
 
-// Protected routes
 router.use(authMiddleware)
 
-// Debug route for checking user info (remove in production)
 router.get("/debug/current-user", (req, res) => {
   res.json({
     success: true,

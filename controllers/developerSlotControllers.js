@@ -398,11 +398,16 @@ const toggleSlotStatus = async (req, res) => {
       })
     }
 
+    // Store the previous status for response message
+    const wasActive = slot.isActive
+
+    // Toggle the status
     slot.isActive = !slot.isActive
     await slot.save()
 
     console.log("Slot toggled successfully:", {
       slotId: slot._id,
+      previousStatus: wasActive,
       newStatus: slot.isActive,
     })
 

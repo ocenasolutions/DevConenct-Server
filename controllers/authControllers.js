@@ -534,7 +534,19 @@ const googleCallback = async (req, res) => {
 // @access  Public
 const githubCallback = async (req, res) => {
   try {
-    const { code, role = "developer", isLogin = true } = req.body
+    const { code, state } = req.method === "GET" ? req.query : req.body
+    let { role = "developer", isLogin = true } = req.method === "GET" ? {} : req.body
+
+    // Parse state parameter if it exists
+    if (state) {
+      try {
+        const parsedState = JSON.parse(decodeURIComponent(state))
+        role = parsedState.role || "developer"
+        isLogin = parsedState.isLogin !== false
+      } catch (e) {
+        console.warn("Could not parse state parameter:", e)
+      }
+    }
 
     console.log("GitHub callback received:", { code: code ? "present" : "missing", role, isLogin })
 
@@ -682,6 +694,13 @@ const githubCallback = async (req, res) => {
     const jwtToken = generateToken(user._id)
     const userResponse = user.toJSON()
 
+    if (req.method === "GET") {
+      const frontendUrl = process.env.FRONTEND_URL || "https://dev-connect1.netlify.app"
+      const redirectUrl = `${frontendUrl}/auth/github/callback?token=${jwtToken}&user=${encodeURIComponent(JSON.stringify(userResponse))}`
+      return res.redirect(redirectUrl)
+    }
+
+    // For POST requests, return JSON response
     res.json({
       success: true,
       message: "GitHub authentication successful",
@@ -690,6 +709,13 @@ const githubCallback = async (req, res) => {
     })
   } catch (error) {
     console.error("GitHub callback error:", error)
+
+    if (req.method === "GET") {
+      const frontendUrl = process.env.FRONTEND_URL || "https://dev-connect1.netlify.app"
+      const errorUrl = `${frontendUrl}/auth?error=${encodeURIComponent(error.message || "Authentication failed")}`
+      return res.redirect(errorUrl)
+    }
+
     res.status(500).json({
       success: false,
       message: "Server error: " + error.message,

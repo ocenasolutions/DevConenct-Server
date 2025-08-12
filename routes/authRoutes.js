@@ -11,6 +11,7 @@ router.post("/login", authController.login)
 router.post("/google", authController.googleAuth)
 router.post("/google/callback", authController.googleCallback)
 router.post("/github/callback", authController.githubCallback)
+router.get("/github/callback", authController.githubCallback)
 router.post("/linkedin", authController.linkedinAuth)
 router.post("/linkedin/callback", authController.linkedinCallback)
 

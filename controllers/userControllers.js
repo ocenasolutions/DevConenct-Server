@@ -33,39 +33,132 @@ exports.getProfile = async (req, res) => {
 }
 
 // Update user profile
+// Update user profile
 exports.updateProfile = async (req, res) => {
   try {
-    const { name, profile, preferences } = req.body
-
-    const user = await User.findById(req.user.userId)
+    const { name, profile, preferences } = req.body;
+    const user = await User.findById(req.user.userId);
 
     if (!user) {
       return res.status(404).json({
         success: false,
         message: "User not found",
-      })
+      });
     }
 
-    // Update fields
-    if (name) user.name = name
-    if (profile) user.profile = { ...user.profile, ...profile }
-    if (preferences) user.preferences = { ...user.preferences, ...preferences }
+    // Update name
+    if (name) {
+      user.name = name;
+    }
 
-    await user.save()
+    // Handle profile updates
+    if (profile) {
+      // Initialize profile if it doesn't exist
+      if (!user.profile) {
+        user.profile = {
+          ratings: {
+            overall: 0,
+            skills: 0,
+            communication: 0,
+            punctuality: 0,
+            expertise: 0,
+            totalReviews: 0
+          }
+        };
+      }
+
+      // Ensure ratings exist before any profile updates
+      if (!user.profile.ratings) {
+        user.profile.ratings = {
+          overall: 0,
+          skills: 0,
+          communication: 0,
+          punctuality: 0,
+          expertise: 0,
+          totalReviews: 0
+        };
+      }
+
+      // Update individual profile fields (excluding ratings)
+      Object.keys(profile).forEach(key => {
+        if (key !== 'ratings' && profile[key] !== undefined) {
+          // Handle arrays - only update if they have content or are explicitly empty arrays
+          if (Array.isArray(profile[key])) {
+            user.profile[key] = profile[key];
+          } 
+          // Handle non-empty strings and other values
+          else if (profile[key] !== '') {
+            user.profile[key] = profile[key];
+          }
+          // Handle empty strings for optional fields
+          else if (profile[key] === '' && ['bio', 'location', 'portfolio', 'github', 'linkedin', 'website', 'calendlyUsername'].includes(key)) {
+            user.profile[key] = '';
+          }
+        }
+      });
+    }
+
+    // Handle preferences updates
+    if (preferences) {
+      // Initialize preferences if it doesn't exist
+      if (!user.preferences) {
+        user.preferences = {};
+      }
+
+      // Handle each preference field individually
+      Object.keys(preferences).forEach(key => {
+        if (preferences[key] !== undefined) {
+          if (key === 'salaryRange') {
+            const sr = preferences[key];
+            // Only set salaryRange if it's a valid object with min/max or if we want to clear it
+            if (sr && typeof sr === 'object' && (sr.min !== undefined || sr.max !== undefined)) {
+              // Ensure we have a valid salaryRange object
+              user.preferences.salaryRange = {
+                min: Number(sr.min) || 0,
+                max: Number(sr.max) || 0
+              };
+            } else if (sr === null || sr === '') {
+              // Remove salaryRange if explicitly set to null or empty
+              user.preferences.salaryRange = undefined;
+            }
+            // Don't update salaryRange if sr is undefined or invalid
+          } else if (key === 'jobType' || key === 'preferredLocations') {
+            // Handle arrays
+            if (Array.isArray(preferences[key])) {
+              user.preferences[key] = preferences[key];
+            }
+          } else {
+            // Handle other preference fields
+            user.preferences[key] = preferences[key];
+          }
+        }
+      });
+    }
+
+    // Use markModified to ensure Mongoose detects nested changes
+    if (profile) {
+      user.markModified('profile');
+    }
+    if (preferences) {
+      user.markModified('preferences');
+    }
+
+    await user.save();
 
     res.json({
       success: true,
       message: "Profile updated successfully",
       user: user.toJSON(),
-    })
+    });
   } catch (error) {
-    console.error("Update profile error:", error)
+    console.error("Update profile error:", error);
     res.status(500).json({
       success: false,
       message: error.message || "Server error",
-    })
+    });
   }
 }
+
 
 // Get profile completion percentage
 exports.getProfileCompletion = async (req, res) => {
